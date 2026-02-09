@@ -5,7 +5,8 @@ import random
 import io
 import itertools
 
-# --- 設定とロジック (先ほどの厳密版と同じ) ---
+# --- 設定 ---
+# 0: A1, 1: A2, 2: B1, 3: B2, 4: Night, 5: M1, 6: M2
 STAFF_ROLES_MAP = {
     0: {'A'},                
     1: {'A', 'B', 'Neko'},   
@@ -100,38 +101,65 @@ def solve_schedule(df):
         random.shuffle(pats)
         day_patterns.append(pats)
 
-    current_paths = [{'sched': np.zeros((num_staff, num_days), dtype=int), 'cons': initial_cons.copy(), 'offs': np.zeros(num_staff, dtype=int), 'score': 0}]
+    # 状態: sched, cons(連勤), offs(休日数), off_cons(連休), score
+    current_paths = [{
+        'sched': np.zeros((num_staff, num_days), dtype=int), 
+        'cons': initial_cons.copy(), 
+        'offs': np.zeros(num_staff, dtype=int), 
+        'off_cons': np.zeros(num_staff, dtype=int),
+        'score': 0
+    }]
     BEAM_WIDTH = 50
     
     for d in range(num_days):
         next_paths = []
         patterns = day_patterns[d]
-        if len(patterns) > 100: patterns = random.sample(patterns, 100)
+        if len(patterns) > 150: patterns = random.sample(patterns, 150)
         
         for path in current_paths:
             for pat in patterns:
                 new_cons = path['cons'].copy()
                 new_offs = path['offs'].copy()
+                new_off_cons = path['off_cons'].copy()
                 penalty = 0
                 violation = False
                 
+                work_mask = np.zeros(num_staff, dtype=int)
+                for s in pat: work_mask[s] = 1
+                
                 for s in range(num_staff):
-                    if s in pat: new_cons[s] += 1
-                    else: new_cons[s] = 0; new_offs[s] += 1
-                    
-                    limit = 3 if s == NIGHT_IDX else 4
-                    if new_cons[s] > limit:
-                        if s in [0, 1] and new_cons[s] <= 5: penalty += 50
-                        else: violation = True; break
+                    if work_mask[s] == 1:
+                        new_cons[s] += 1
+                        new_off_cons[s] = 0
+                        # 連勤制限 (厳しめ: 3連勤推奨)
+                        if new_cons[s] > 4: 
+                            if s in [0, 1] and new_cons[s] <= 5: penalty += 500
+                            else: violation = True; break
+                        elif new_cons[s] == 4: penalty += 50 # 4連勤は少し避ける
+                    else:
+                        new_cons[s] = 0
+                        new_offs[s] += 1
+                        new_off_cons[s] += 1
+                        # 連休制限 (3連休以上を避ける＝分散させる)
+                        if new_off_cons[s] >= 3: 
+                            if s == 6: penalty += 500 # 朝2は特に分散
+                            else: penalty += 100
+
                 if violation: continue
                 
+                # 休日数のペース配分チェック（分散のため）
                 days_left = num_days - 1 - d
-                if np.any(new_offs > req_offs): penalty += 100
-                if np.any(new_offs + days_left < req_offs): penalty += 1000
+                if np.any(new_offs > req_offs): penalty += 200
+                if np.any(new_offs + days_left < req_offs): penalty += 2000
                 
+                # 理想的な休日ペースからの乖離をペナルティ化
+                expected_offs = req_offs * ((d + 1) / num_days)
+                diffs = np.abs(new_offs - expected_offs)
+                penalty += np.sum(diffs) * 10
+
                 new_sched = path['sched'].copy()
-                new_sched[:, d] = [1 if s in pat else 0 for s in range(num_staff)]
-                next_paths.append({'sched': new_sched, 'cons': new_cons, 'offs': new_offs, 'score': path['score'] + penalty})
+                new_sched[:, d] = work_mask
+                next_paths.append({'sched': new_sched, 'cons': new_cons, 'offs': new_offs, 'off_cons': new_off_cons, 'score': path['score'] + penalty})
         
         next_paths.sort(key=lambda x: x['score'])
         if not next_paths: return None
@@ -151,31 +179,28 @@ def solve_schedule(df):
     return output_df
 
 # --- Webアプリ画面 ---
-st.title('自動シフト作成ツール')
-st.markdown("CSVファイルをアップロードすると、条件を満たすシフト表を自動生成します。")
+st.title('自動シフト作成ツール (バランス調整版)')
+st.markdown("CSVファイルをアップロードすると、連勤を抑え、休みを分散させたシフト表を自動生成します。")
 
 uploaded_file = st.file_uploader("CSVファイルをアップロード", type=['csv'])
 
 if uploaded_file is not None:
-    st.info("計算中... しばらくお待ちください")
+    st.info("計算中... バランスを調整しています")
     try:
         df_input = pd.read_csv(uploaded_file, header=None)
         result_df = solve_schedule(df_input)
         
         if result_df is not None:
             st.success("作成完了！")
-            
-            # CSV変換
             csv = result_df.to_csv(index=False, header=False).encode('utf-8-sig')
-            
             st.download_button(
                 label="シフト表をダウンロード (CSV)",
                 data=csv,
-                file_name='完成シフト表.csv',
+                file_name='バランス調整版シフト表.csv',
                 mime='text/csv',
             )
         else:
-            st.error("条件が厳しすぎてシフトが組めませんでした。条件（休み希望など）を緩和して再試行してください。")
+            st.error("条件が厳しすぎてシフトが組めませんでした。")
             
     except Exception as e:
         st.error(f"エラーが発生しました: {e}")

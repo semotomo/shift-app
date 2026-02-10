@@ -132,7 +132,7 @@ def assign_roles_smartly(working_indices, role_map):
     return assignments
 
 def solve_schedule_from_ui(staff_df, holidays_df, days_list):
-    # 空行やNoneを含む行を削除してクリーンアップ
+    # クリーンアップ
     staff_df = staff_df.dropna(subset=['名前'])
     staff_df = staff_df[staff_df['名前'] != '']
     
@@ -142,22 +142,18 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     if num_staff == 0: return None
     
     role_map = {}
-    # インデックスをリセットして0から振り直す（削除後のズレ防止）
     staff_df = staff_df.reset_index(drop=True)
     
     for i, row in staff_df.iterrows():
         role_map[i] = parse_roles(str(row['役割(カンマ区切り)']))
 
-    # 型変換エラー防止（Noneや空文字を0に）
     try:
         initial_cons = pd.to_numeric(staff_df['先月からの連勤'], errors='coerce').fillna(0).astype(int).values
         req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
     except:
-        return None # データ不正
+        return None 
     
     fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
-    
-    # holidays_dfもインデックスリセットして同期
     holidays_df = holidays_df.reset_index(drop=True)
     
     for d_idx in range(num_days):
@@ -244,7 +240,10 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     best_path = current_paths[0]
     final_sched = best_path['sched']
     
-    output_cols = [d.strftime('%m/%d(%a)') for d in days_list]
+    # --- 日付ヘッダーの日本語化 ---
+    weekdays_jp = ["(月)", "(火)", "(水)", "(木)", "(金)", "(土)", "(日)"]
+    output_cols = [f"{d.month}/{d.day}{weekdays_jp[d.weekday()]}" for d in days_list]
+    
     output_data = np.full((num_staff + 1, num_days), "", dtype=object)
     insufficient_row_idx = num_staff
     
@@ -301,7 +300,7 @@ with st.sidebar:
     next_month_end = (start_date.replace(day=1) + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
     
     col_d1, col_d2 = st.columns(2)
-    # カレンダーの日本語化（format="YYYY/MM/DD"）
+    # カレンダーの表示フォーマット指定（YYYY/MM/DD）
     start_input = col_d1.date_input("開始日", start_date, format="YYYY/MM/DD")
     end_input = col_d2.date_input("終了日", next_month_end, format="YYYY/MM/DD")
     
@@ -368,13 +367,18 @@ valid_names = edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_
 if len(valid_names) == len(display_holidays_df):
     display_holidays_df.index = valid_names
 else:
-    # 万が一ズレた場合はインデックスなしで表示（エラー回避）
     pass
 
+# 希望休チェックボックスのカレンダー表示も日本語曜日を入れる
 edited_holidays_grid = st.data_editor(
     display_holidays_df,
     use_container_width=True,
-    column_config={col: st.column_config.CheckboxColumn(f"{days_list[i].day}日", default=False) for i, col in enumerate(holiday_cols)}
+    column_config={
+        col: st.column_config.CheckboxColumn(
+            f"{days_list[i].day}({['月','火','水','木','金','土','日'][days_list[i].weekday()]})", 
+            default=False
+        ) for i, col in enumerate(holiday_cols)
+    }
 )
 st.session_state.holidays_df = edited_holidays_grid.reset_index(drop=True)
 
@@ -383,7 +387,6 @@ st.markdown("### 3️⃣ シフト作成")
 if st.button("シフトを作成する", type="primary"):
     with st.spinner("AIがシフトパズルを解いています...🧩"):
         try:
-            # 実行前に再度空行クリーンアップ
             result_df = solve_schedule_from_ui(edited_staff_df, edited_holidays_grid, days_list)
             
             if result_df is not None:

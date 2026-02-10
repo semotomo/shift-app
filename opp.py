@@ -300,9 +300,11 @@ with st.sidebar:
     next_month_end = (start_date.replace(day=1) + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
     
     col_d1, col_d2 = st.columns(2)
-    # カレンダーの表示フォーマット指定（YYYY/MM/DD）
+    # カレンダー入力のフォーマット指定（日本語圏向け）
     start_input = col_d1.date_input("開始日", start_date, format="YYYY/MM/DD")
     end_input = col_d2.date_input("終了日", next_month_end, format="YYYY/MM/DD")
+    
+    st.caption("※カレンダーの日付（月火水...）はブラウザの設定言語で表示されます")
     
     days_list = pd.date_range(start_input, end_input).tolist()
     num_days = len(days_list)
@@ -334,8 +336,7 @@ with st.sidebar:
 # --- メインエリア ---
 
 st.markdown("### 1️⃣ スタッフ設定")
-st.markdown("名前、役割、先月からの連勤数、今月の公休数を入力してください（行の追加・削除可）")
-st.caption("※行を選択してDeleteキーで削除できます")
+st.info("💡 **行の削除方法**: 左端の番号をクリックして行を選択し、キーボードの **Delete** キー（Macは **Fn+Delete**）を押してください。")
 
 edited_staff_df = st.data_editor(
     st.session_state.staff_df,
@@ -345,7 +346,7 @@ edited_staff_df = st.data_editor(
 )
 st.session_state.staff_df = edited_staff_df
 
-# スタッフ数同期ロジック（空行を無視してカウント）
+# スタッフ数同期ロジック
 valid_staff_count = len(edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")])
 current_holiday_rows = len(st.session_state.holidays_df)
 
@@ -362,14 +363,14 @@ st.markdown("希望休（×）がある場合は、チェックボックスをON
 holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
 display_holidays_df = st.session_state.holidays_df.reindex(columns=holiday_cols, fill_value=False)
 
-# 名前リストも空行を除去して同期
+# 名前リスト同期
 valid_names = edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")]['名前']
 if len(valid_names) == len(display_holidays_df):
     display_holidays_df.index = valid_names
 else:
     pass
 
-# 希望休チェックボックスのカレンダー表示も日本語曜日を入れる
+# チェックボックス列名の日本語曜日化
 edited_holidays_grid = st.data_editor(
     display_holidays_df,
     use_container_width=True,

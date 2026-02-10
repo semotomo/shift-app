@@ -20,7 +20,6 @@ if 'staff_df' not in st.session_state:
     st.session_state.staff_df = pd.DataFrame(default_data)
 
 if 'holidays_df' not in st.session_state:
-    # 初期はスタッフ数と同じ行数を作成
     num_staff = len(st.session_state.staff_df)
     st.session_state.holidays_df = pd.DataFrame(False, index=range(num_staff), columns=[f"Day_{i+1}" for i in range(31)])
 
@@ -133,24 +132,40 @@ def assign_roles_smartly(working_indices, role_map):
     return assignments
 
 def solve_schedule_from_ui(staff_df, holidays_df, days_list):
+    # 空行やNoneを含む行を削除してクリーンアップ
+    staff_df = staff_df.dropna(subset=['名前'])
+    staff_df = staff_df[staff_df['名前'] != '']
+    
     num_days = len(days_list)
     num_staff = len(staff_df)
     
+    if num_staff == 0: return None
+    
     role_map = {}
+    # インデックスをリセットして0から振り直す（削除後のズレ防止）
+    staff_df = staff_df.reset_index(drop=True)
+    
     for i, row in staff_df.iterrows():
         role_map[i] = parse_roles(str(row['役割(カンマ区切り)']))
 
-    initial_cons = staff_df['先月からの連勤'].astype(int).values
-    req_offs = staff_df['公休数'].astype(int).values
+    # 型変換エラー防止（Noneや空文字を0に）
+    try:
+        initial_cons = pd.to_numeric(staff_df['先月からの連勤'], errors='coerce').fillna(0).astype(int).values
+        req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
+    except:
+        return None # データ不正
     
     fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
+    
+    # holidays_dfもインデックスリセットして同期
+    holidays_df = holidays_df.reset_index(drop=True)
     
     for d_idx in range(num_days):
         col_name = f"Day_{d_idx+1}"
         if col_name in holidays_df.columns:
             col_data = holidays_df[col_name].values
             for s_idx in range(num_staff):
-                if s_idx < len(col_data): # 安全策
+                if s_idx < len(col_data): 
                     if col_data[s_idx] == True or col_data[s_idx] == '×':
                         fixed_shifts[s_idx, d_idx] = '×'
     
@@ -286,8 +301,9 @@ with st.sidebar:
     next_month_end = (start_date.replace(day=1) + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
     
     col_d1, col_d2 = st.columns(2)
-    start_input = col_d1.date_input("開始日", start_date)
-    end_input = col_d2.date_input("終了日", next_month_end)
+    # カレンダーの日本語化（format="YYYY/MM/DD"）
+    start_input = col_d1.date_input("開始日", start_date, format="YYYY/MM/DD")
+    end_input = col_d2.date_input("終了日", next_month_end, format="YYYY/MM/DD")
     
     days_list = pd.date_range(start_input, end_input).tolist()
     num_days = len(days_list)
@@ -295,8 +311,12 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("💾 データの保存/読込")
     
+    # 保存時に空行を除去して保存
+    clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
+    clean_staff_df = clean_staff_df[clean_staff_df['名前'] != '']
+    
     current_data = {
-        "staff": st.session_state.staff_df.to_dict(),
+        "staff": clean_staff_df.to_dict(),
         "holidays": st.session_state.holidays_df.to_dict()
     }
     json_str = json.dumps(current_data, ensure_ascii=False)
@@ -316,44 +336,46 @@ with st.sidebar:
 
 st.markdown("### 1️⃣ スタッフ設定")
 st.markdown("名前、役割、先月からの連勤数、今月の公休数を入力してください（行の追加・削除可）")
+st.caption("※行を選択してDeleteキーで削除できます")
 
-# スタッフデータの編集
 edited_staff_df = st.data_editor(
     st.session_state.staff_df,
-    num_rows="dynamic", # 行の追加削除を許可
+    num_rows="dynamic",
     use_container_width=True,
     height=300
 )
 st.session_state.staff_df = edited_staff_df
 
-# 【重要】スタッフ数の増減に合わせて希望休テーブルの行数を同期する
-current_staff_count = len(edited_staff_df)
+# スタッフ数同期ロジック（空行を無視してカウント）
+valid_staff_count = len(edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")])
 current_holiday_rows = len(st.session_state.holidays_df)
 
-if current_staff_count > current_holiday_rows:
-    # スタッフが増えた分、行を追加 (Falseで埋める)
-    rows_to_add = current_staff_count - current_holiday_rows
+if valid_staff_count > current_holiday_rows:
+    rows_to_add = valid_staff_count - current_holiday_rows
     new_data = pd.DataFrame(False, index=range(rows_to_add), columns=st.session_state.holidays_df.columns)
     st.session_state.holidays_df = pd.concat([st.session_state.holidays_df, new_data], ignore_index=True)
-
-elif current_staff_count < current_holiday_rows:
-    # スタッフが減った分、行を削除
-    st.session_state.holidays_df = st.session_state.holidays_df.iloc[:current_staff_count]
+elif valid_staff_count < current_holiday_rows:
+    st.session_state.holidays_df = st.session_state.holidays_df.iloc[:valid_staff_count]
 
 st.markdown("### 2️⃣ 希望休入力")
 st.markdown("希望休（×）がある場合は、チェックボックスをONにしてください。")
 
-# 列の調整と表示
 holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
 display_holidays_df = st.session_state.holidays_df.reindex(columns=holiday_cols, fill_value=False)
-display_holidays_df.index = edited_staff_df['名前'] # ここでのエラーが解消されます
+
+# 名前リストも空行を除去して同期
+valid_names = edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")]['名前']
+if len(valid_names) == len(display_holidays_df):
+    display_holidays_df.index = valid_names
+else:
+    # 万が一ズレた場合はインデックスなしで表示（エラー回避）
+    pass
 
 edited_holidays_grid = st.data_editor(
     display_holidays_df,
     use_container_width=True,
     column_config={col: st.column_config.CheckboxColumn(f"{days_list[i].day}日", default=False) for i, col in enumerate(holiday_cols)}
 )
-# セッション状態に保存（インデックスは保存せずリセット）
 st.session_state.holidays_df = edited_holidays_grid.reset_index(drop=True)
 
 st.markdown("### 3️⃣ シフト作成")
@@ -361,6 +383,7 @@ st.markdown("### 3️⃣ シフト作成")
 if st.button("シフトを作成する", type="primary"):
     with st.spinner("AIがシフトパズルを解いています...🧩"):
         try:
+            # 実行前に再度空行クリーンアップ
             result_df = solve_schedule_from_ui(edited_staff_df, edited_holidays_grid, days_list)
             
             if result_df is not None:

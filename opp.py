@@ -2,38 +2,48 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import random
-import io
 import itertools
+import json
+import datetime
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
 
-# --- 設定 ---
-STAFF_ROLES_MAP = {
-    0: {'A'},                
-    1: {'A', 'B', 'Neko'},   
-    2: {'B', 'C', 'Neko'},   
-    3: {'B', 'C', 'Neko'},   
-    4: {'Night'},            
-    5: {'Neko', 'C'},        
-    6: {'Neko', 'C'}         
-}
+# --- セッション状態の初期化（データを保持するため） ---
+if 'staff_df' not in st.session_state:
+    # デフォルトのスタッフ設定
+    default_data = {
+        "名前": ["正社員A_1", "正社員A_2", "正社員B_1", "正社員B_2", "パート夜", "パート朝1", "パート朝2"],
+        "役割(カンマ区切り)": ["A", "A,B,Neko", "B,C,Neko", "B,C,Neko", "Night", "Neko,C", "Neko,C"],
+        "先月からの連勤": [0, 5, 1, 0, 0, 2, 2],
+        "公休数": [8, 8, 8, 8, 13, 9, 15]
+    }
+    st.session_state.staff_df = pd.DataFrame(default_data)
+
+if 'holidays_df' not in st.session_state:
+    # デフォルトの希望休グリッド（空）
+    st.session_state.holidays_df = pd.DataFrame(columns=[f"Day_{i+1}" for i in range(31)])
+
+# --- 定数（ロジック用） ---
+FULL_TIME_IDXS = [0, 1, 2, 3] # 正社員のインデックス（固定）
 NIGHT_IDX = 4
 M1_IDX = 5
 M2_IDX = 6
-FULL_TIME_IDXS = [0, 1, 2, 3]
 
-# --- 判定・割り当て関数 ---
+# --- ロジック関数 ---
 
-def can_cover_required_roles(staff_list):
-    """
-    そのメンバーで最低限の役割（夜勤＋正社員2名、およびA,B,C,ネコ）が満かせるか判定
-    """
+def parse_roles(role_str):
+    """文字列 'A, B, Neko' をセット {'A', 'B', 'Neko'} に変換"""
+    return {r.strip() for r in role_str.split(',')}
+
+def can_cover_required_roles(staff_list, role_map):
+    # 夜勤チェック
     if NIGHT_IDX in staff_list:
         if sum(1 for s in staff_list if s in FULL_TIME_IDXS) < 2: return False
     
     pool = [s for s in staff_list if s != NIGHT_IDX]
     
+    # ネコチェック（M1, M2優先）
     neko_fixed = None
     if M1_IDX in pool: neko_fixed = M1_IDX
     elif M2_IDX in pool: neko_fixed = M2_IDX
@@ -42,12 +52,12 @@ def can_cover_required_roles(staff_list):
         rem = [x for x in pool if x != neko_fixed]
         if len(rem) < 3: return False
         for p in itertools.permutations(rem, 3):
-            if 'A' in STAFF_ROLES_MAP[p[0]] and 'B' in STAFF_ROLES_MAP[p[1]] and 'C' in STAFF_ROLES_MAP[p[2]]:
+            if 'A' in role_map[p[0]] and 'B' in role_map[p[1]] and 'C' in role_map[p[2]]:
                 return True
     else:
         if len(pool) < 4: return False
         for p in itertools.permutations(pool, 4):
-            if 'Neko' in STAFF_ROLES_MAP[p[0]] and 'A' in STAFF_ROLES_MAP[p[1]] and 'B' in STAFF_ROLES_MAP[p[2]] and 'C' in STAFF_ROLES_MAP[p[3]]:
+            if 'Neko' in role_map[p[0]] and 'A' in role_map[p[1]] and 'B' in role_map[p[2]] and 'C' in role_map[p[3]]:
                 return True
     return False
 
@@ -58,104 +68,69 @@ def get_possible_day_patterns(available_staff):
             patterns.append(subset)
     return patterns
 
-def assign_roles_smartly(working_indices):
-    """
-    確定したメンバーに対して、可能な限り適切に役割を割り振る
-    （厳密な解がない場合でも、CばかりにせずAやBを優先的に埋める）
-    """
+def assign_roles_smartly(working_indices, role_map):
     assignments = {}
-    
-    # 1. 夜勤の割り当て
-    if NIGHT_IDX in working_indices: 
-        assignments[NIGHT_IDX] = '〇'
+    if NIGHT_IDX in working_indices: assignments[NIGHT_IDX] = '〇'
     
     pool = [s for s in working_indices if s != NIGHT_IDX]
     if not pool: return assignments
     
-    # --- 厳密な割り当てを試行 ---
+    # ネコ優先
     neko_fixed = None
     if M1_IDX in pool: neko_fixed = M1_IDX
     elif M2_IDX in pool: neko_fixed = M2_IDX
     
     found_strict = False
     
-    # ネコ固定パターン
     if neko_fixed is not None:
         rem = [x for x in pool if x != neko_fixed]
         for p in itertools.permutations(rem, 3):
-            if 'A' in STAFF_ROLES_MAP[p[0]] and 'B' in STAFF_ROLES_MAP[p[1]] and 'C' in STAFF_ROLES_MAP[p[2]]:
+            if 'A' in role_map[p[0]] and 'B' in role_map[p[1]] and 'C' in role_map[p[2]]:
                 assignments[neko_fixed] = 'ネコ'
-                assignments[p[0]] = 'A'
-                assignments[p[1]] = 'B'
-                assignments[p[2]] = 'C'
+                assignments[p[0]] = 'A'; assignments[p[1]] = 'B'; assignments[p[2]] = 'C'
                 found_strict = True
-                
-                # 余り人員の割り当て（Cばかりにしない）
+                # 余り
                 for ex in rem:
                     if ex not in p:
-                        caps = STAFF_ROLES_MAP[ex]
-                        # AやBができるなら優先的に振る（バランスのため）
-                        # ただし基本はCやフリー枠
+                        caps = role_map[ex]
                         if 'C' in caps: assignments[ex] = 'C'
                         elif 'B' in caps: assignments[ex] = 'B'
                         elif 'A' in caps: assignments[ex] = 'A'
                 break
     else:
-        # ネコ変動パターン
         for p in itertools.permutations(pool, 4):
-            if 'Neko' in STAFF_ROLES_MAP[p[0]] and 'A' in STAFF_ROLES_MAP[p[1]] and 'B' in STAFF_ROLES_MAP[p[2]] and 'C' in STAFF_ROLES_MAP[p[3]]:
-                assignments[p[0]] = 'ネコ'
-                assignments[p[1]] = 'A'
-                assignments[p[2]] = 'B'
-                assignments[p[3]] = 'C'
+            if 'Neko' in role_map[p[0]] and 'A' in role_map[p[1]] and 'B' in role_map[p[2]] and 'C' in role_map[p[3]]:
+                assignments[p[0]] = 'ネコ'; assignments[p[1]] = 'A'; assignments[p[2]] = 'B'; assignments[p[3]] = 'C'
                 found_strict = True
-                
+                # 余り
                 for ex in pool:
                     if ex not in p:
-                        caps = STAFF_ROLES_MAP[ex]
+                        caps = role_map[ex]
                         if 'C' in caps: assignments[ex] = 'C'
                         elif 'B' in caps: assignments[ex] = 'B'
                         elif 'A' in caps: assignments[ex] = 'A'
                 break
-    
-    if found_strict:
-        return assignments
 
-    # --- 厳密解がない場合のベストエフォート（Cばかり防衛策） ---
-    # 優先順位: A > B > Neko > C
+    if found_strict: return assignments
+
+    # ベストエフォート（厳密解なし）
     unassigned = set(pool)
+    for s in pool:
+        if s in unassigned and 'A' in role_map[s]:
+            assignments[s] = 'A'; unassigned.remove(s); break
+    for s in pool:
+        if s in unassigned and 'B' in role_map[s]:
+            assignments[s] = 'B'; unassigned.remove(s); break
     
-    # 1. Aを埋める
-    for s in pool:
-        if s in unassigned and 'A' in STAFF_ROLES_MAP[s]:
-            assignments[s] = 'A'
-            unassigned.remove(s)
-            break
-            
-    # 2. Bを埋める
-    for s in pool:
-        if s in unassigned and 'B' in STAFF_ROLES_MAP[s]:
-            assignments[s] = 'B'
-            unassigned.remove(s)
-            break
-            
-    # 3. ネコを埋める (M1, M2優先)
-    if M1_IDX in unassigned:
-        assignments[M1_IDX] = 'ネコ'
-        unassigned.remove(M1_IDX)
-    elif M2_IDX in unassigned:
-        assignments[M2_IDX] = 'ネコ'
-        unassigned.remove(M2_IDX)
+    if M1_IDX in unassigned: assignments[M1_IDX] = 'ネコ'; unassigned.remove(M1_IDX)
+    elif M2_IDX in unassigned: assignments[M2_IDX] = 'ネコ'; unassigned.remove(M2_IDX)
     else:
         for s in pool:
-            if s in unassigned and 'Neko' in STAFF_ROLES_MAP[s]:
-                assignments[s] = 'ネコ'
-                unassigned.remove(s)
-                break
+            if s in unassigned and 'Neko' in role_map[s]:
+                assignments[s] = 'ネコ'; unassigned.remove(s); break
                 
-    # 4. 残りを埋める (C優先だが、BやAも可)
-    for s in list(unassigned): # list化して安全に反復
-        caps = STAFF_ROLES_MAP[s]
+    for s in list(unassigned):
+        caps = role_map[s]
         if 'C' in caps: assignments[s] = 'C'
         elif 'B' in caps: assignments[s] = 'B'
         elif 'A' in caps: assignments[s] = 'A'
@@ -163,15 +138,37 @@ def assign_roles_smartly(working_indices):
         
     return assignments
 
-def solve_schedule(df):
-    dates = df.iloc[1, 2:30].values
-    staff_data = df.iloc[3:10, :].reset_index(drop=True)
-    initial_cons = staff_data[0].astype(int).values
-    req_offs = staff_data[30].astype(int).values
-    fixed_shifts = staff_data.iloc[:, 2:30].values
-    num_days = len(dates)
-    num_staff = 7
+def solve_schedule_from_ui(staff_df, holidays_df, days_list):
+    num_days = len(days_list)
+    num_staff = len(staff_df)
     
+    # 役割マップの構築
+    role_map = {}
+    for i, row in staff_df.iterrows():
+        role_map[i] = parse_roles(str(row['役割(カンマ区切り)']))
+        # Nightタグの処理
+        if 'Night' in role_map[i]: 
+            # Nightスタッフは特殊扱いだがrole_mapには入れておく
+            pass
+
+    initial_cons = staff_df['先月からの連勤'].astype(int).values
+    req_offs = staff_df['公休数'].astype(int).values
+    
+    # 希望休データの配列化
+    fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
+    
+    # holidays_dfの列名とdays_listを同期
+    # UIのグリッドは常に31列あるかもしれないので、今回の日数分だけ見る
+    for d_idx in range(num_days):
+        col_name = f"Day_{d_idx+1}" # 仮のカラム名
+        # UIのDataEditorから取得（列が存在すれば）
+        if col_name in holidays_df.columns:
+            col_data = holidays_df[col_name].values
+            for s_idx in range(num_staff):
+                if col_data[s_idx] == True or col_data[s_idx] == '×': # チェックボックスまたは文字
+                    fixed_shifts[s_idx, d_idx] = '×'
+    
+    # パターン生成
     day_patterns = []
     for d in range(num_days):
         avail = [s for s in range(num_staff) if fixed_shifts[s, d] != '×']
@@ -179,6 +176,7 @@ def solve_schedule(df):
         random.shuffle(pats)
         day_patterns.append(pats)
 
+    # ビームサーチ
     current_paths = [{
         'sched': np.zeros((num_staff, num_days), dtype=int),
         'cons': initial_cons.copy(),
@@ -186,17 +184,14 @@ def solve_schedule(df):
         'off_cons': np.zeros(num_staff, dtype=int),
         'score': 0
     }]
-    
-    # 探索幅を拡大（月末の手詰まり防止）
-    BEAM_WIDTH = 150 
+    BEAM_WIDTH = 150
     
     for d in range(num_days):
         next_paths = []
         patterns = day_patterns[d]
         
-        valid_pats = [p for p in patterns if can_cover_required_roles(p)]
-        invalid_pats = [p for p in patterns if not can_cover_required_roles(p)]
-        # 有効なパターンをより多く探索候補に入れる
+        valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map)]
+        invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map)]
         use_patterns = valid_pats[:150] + invalid_pats[:30]
         
         for path in current_paths:
@@ -207,9 +202,8 @@ def solve_schedule(df):
                 penalty = 0
                 violation = False
                 
-                # 不足チェック
-                if not can_cover_required_roles(pat):
-                    penalty += 50000 
+                if not can_cover_required_roles(pat, role_map):
+                    penalty += 50000
                 
                 work_mask = np.zeros(num_staff, dtype=int)
                 for s in pat: work_mask[s] = 1
@@ -229,7 +223,7 @@ def solve_schedule(df):
                         if new_off_cons[s] >= 3:
                             penalty += 100
                             if s == 6: penalty += 200
-                            
+                
                 if violation: continue
                 
                 days_left = num_days - 1 - d
@@ -251,100 +245,157 @@ def solve_schedule(df):
     best_path = current_paths[0]
     final_sched = best_path['sched']
     
-    output_df = df.copy()
-    insufficient_row = [""] * 31
-    insufficient_row[1] = "不足"
+    # 出力データフレーム作成
+    # 列名: 日付 (str)
+    output_cols = [d.strftime('%m/%d(%a)') for d in days_list]
+    output_data = np.full((num_staff + 1, num_days), "", dtype=object) # +1 for 不足行
+    
+    insufficient_row_idx = num_staff
     
     for d in range(num_days):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
+        roles = assign_roles_smartly(working, role_map)
         
-        # スマート割り当て実行
-        roles = assign_roles_smartly(working)
-        
-        # 不足判定（厳密チェック）
         is_insufficient = False
-        if not can_cover_required_roles(working): is_insufficient = True
+        if not can_cover_required_roles(working, role_map): is_insufficient = True
         
         for s in range(num_staff):
-            r_idx = 3 + s; c_idx = 2 + d
             if s in working:
                 if s in roles: 
-                    output_df.iloc[r_idx, c_idx] = roles[s]
-                else: 
-                    # 万が一漏れた場合の最終安全策
-                    if 'C' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'C'
-                    elif 'B' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'B'
-                    else: output_df.iloc[r_idx, c_idx] = 'C'
+                    output_data[s, d] = roles[s]
+                else:
+                    # 最終安全策
+                    caps = role_map[s]
+                    if 'C' in caps: output_data[s, d] = 'C'
+                    elif 'B' in caps: output_data[s, d] = 'B'
+                    elif 'A' in caps: output_data[s, d] = 'A'
+                    else: output_data[s, d] = 'C'
             else:
-                output_df.iloc[r_idx, c_idx] = '×' if fixed_shifts[s, d] == '×' else '／'
+                output_data[s, d] = '×' if fixed_shifts[s, d] == '×' else '／'
         
-        if is_insufficient: insufficient_row[2 + d] = "※"
+        if is_insufficient: output_data[insufficient_row_idx, d] = "※"
             
-    output_df.loc[10] = insufficient_row
-    return output_df
+    # インデックス（行名）
+    index_names = list(staff_df['名前']) + ["不足"]
+    
+    result_df = pd.DataFrame(output_data, columns=output_cols, index=index_names)
+    return result_df
 
-# --- スタイリング関数 ---
+
+# --- スタイリング ---
 def highlight_cells(val):
-    if val == '／':
-        return 'background-color: #ffcccc; color: black'
-    elif val == '×':
-        return 'background-color: #d9d9d9; color: gray'
-    elif val == '※':
-        return 'background-color: #ff0000; color: white; font-weight: bold'
-    elif val == 'A':
-        return 'background-color: #ccffff; color: black'
-    elif val == 'B':
-        return 'background-color: #ccffcc; color: black'
-    elif val == 'C':
-        return 'background-color: #ffffcc; color: black'
-    elif val == 'ネコ':
-        return 'background-color: #ffe5cc; color: black'
-    elif val == '〇':
-        return 'background-color: #e6e6fa; color: black'
+    if val == '／': return 'background-color: #ffcccc; color: black'
+    elif val == '×': return 'background-color: #d9d9d9; color: gray'
+    elif val == '※': return 'background-color: #ff0000; color: white; font-weight: bold'
+    elif val == 'A': return 'background-color: #ccffff; color: black'
+    elif val == 'B': return 'background-color: #ccffcc; color: black'
+    elif val == 'C': return 'background-color: #ffffcc; color: black'
+    elif val == 'ネコ': return 'background-color: #ffe5cc; color: black'
+    elif val == '〇': return 'background-color: #e6e6fa; color: black'
     return ''
 
-# --- Webアプリ画面 ---
-st.title('📅 自動シフト作成ツール')
-st.markdown("""
-CSVファイルをアップロードすると、条件を満たしたシフト表を自動生成して表示します。
-- **／** : 公休
-- **×** : 希望休
-- **※** : 人員不足（要確認）
-""")
+# ==========================================
+# UI実装
+# ==========================================
+st.title('📅 ブラウザ入力型 シフト作成ツール')
 
-uploaded_file = st.file_uploader("CSVファイルをアップロードしてください", type=['csv'])
-
-if uploaded_file is not None:
-    st.info("計算中... 最適なシフトパズルを解いています🧩")
+# --- サイドバー: 設定保存・読込 & 日付設定 ---
+with st.sidebar:
+    st.header("⚙️ 設定・保存")
     
-    try:
-        df_input = pd.read_csv(uploaded_file, header=None)
-        result_df = solve_schedule(df_input)
-        
-        if result_df is not None:
-            st.success("✨ 作成完了！")
+    # 日付範囲
+    today = datetime.date.today()
+    next_month = today.replace(day=1) + datetime.timedelta(days=32)
+    start_date = next_month.replace(day=1)
+    # 月末を計算
+    next_month_end = (start_date.replace(day=1) + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
+    
+    col_d1, col_d2 = st.columns(2)
+    start_input = col_d1.date_input("開始日", start_date)
+    end_input = col_d2.date_input("終了日", next_month_end)
+    
+    # 日付リスト生成
+    days_list = pd.date_range(start_input, end_input).tolist()
+    num_days = len(days_list)
+    
+    st.markdown("---")
+    st.subheader("💾 データの保存/読込")
+    
+    # 保存機能
+    current_data = {
+        "staff": st.session_state.staff_df.to_dict(),
+        "holidays": st.session_state.holidays_df.to_dict()
+    }
+    json_str = json.dumps(current_data, ensure_ascii=False)
+    st.download_button(
+        label="設定を保存 (JSON)",
+        data=json_str,
+        file_name="shift_settings.json",
+        mime="application/json"
+    )
+    
+    # 読込機能
+    uploaded_json = st.file_uploader("設定を読み込む", type=["json"])
+    if uploaded_json is not None:
+        try:
+            loaded_data = json.load(uploaded_json)
+            st.session_state.staff_df = pd.DataFrame(loaded_data["staff"])
+            st.session_state.holidays_df = pd.DataFrame(loaded_data["holidays"])
+            st.success("設定を読み込みました！")
+        except:
+            st.error("ファイルの読み込みに失敗しました")
+
+# --- メインエリア ---
+
+st.markdown("### 1️⃣ スタッフ設定")
+st.markdown("名前、役割、先月からの連勤数、今月の公休数を入力してください。")
+
+edited_staff_df = st.data_editor(
+    st.session_state.staff_df,
+    num_rows="fixed",
+    use_container_width=True,
+    height=300
+)
+# セッション状態を更新
+st.session_state.staff_df = edited_staff_df
+
+st.markdown("### 2️⃣ 希望休入力")
+st.markdown("希望休（×）がある場合は、下の表のチェックボックスをONにしてください。")
+
+# 希望休グリッドの作成（動的）
+# 日付ごとの列を作る
+holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
+display_holidays_df = st.session_state.holidays_df.reindex(columns=holiday_cols, fill_value=False)
+# 行名をスタッフ名にする
+display_holidays_df.index = edited_staff_df['名前']
+
+# DataEditorで編集（チェックボックス）
+edited_holidays_grid = st.data_editor(
+    display_holidays_df,
+    use_container_width=True,
+    column_config={col: st.column_config.CheckboxColumn(f"{days_list[i].day}日", default=False) for i, col in enumerate(holiday_cols)}
+)
+# セッション状態に保存（次回用）
+st.session_state.holidays_df = edited_holidays_grid.reset_index(drop=True)
+
+st.markdown("### 3️⃣ シフト作成")
+
+if st.button("シフトを作成する", type="primary"):
+    with st.spinner("AIがシフトパズルを解いています...🧩"):
+        try:
+            result_df = solve_schedule_from_ui(edited_staff_df, edited_holidays_grid, days_list)
             
-            display_df = result_df.fillna("")
-            styled_df = display_df.style.map(highlight_cells)
-            
-            st.dataframe(
-                styled_df,
-                use_container_width=True,
-                height=600
-            )
-            
-            csv = result_df.to_csv(index=False, header=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 シフト表をダウンロード (CSV)",
-                data=csv,
-                file_name='完成シフト表.csv',
-                mime='text/csv',
-                type="primary"
-            )
-            
-        else:
-            st.error("⚠️ 条件が厳しすぎて、すべてのルールを満たすシフトが組めませんでした。")
-            st.markdown("条件（連勤制限や希望休）を少し緩和して、再度お試しください。")
-            
-    except Exception as e:
-        st.error(f"エラーが発生しました: {e}")
+            if result_df is not None:
+                st.success("作成完了！")
+                
+                # スタイリング表示
+                styled_df = result_df.fillna("").style.map(highlight_cells)
+                st.dataframe(styled_df, use_container_width=True, height=600)
+                
+                # ダウンロード
+                csv = result_df.to_csv().encode('utf-8-sig')
+                st.download_button("CSVダウンロード", csv, "shift_result.csv", "text/csv")
+            else:
+                st.error("条件を満たすシフトが見つかりませんでした。条件を緩和してください。")
+        except Exception as e:
+            st.error(f"エラー: {e}")

@@ -5,29 +5,56 @@ import random
 import itertools
 import json
 import datetime
+import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(自動保存版)", layout="wide")
 
-# --- セッション状態の初期化 ---
-if 'staff_df' not in st.session_state:
-    default_data = {
+# --- 定数 ---
+SETTINGS_FILE = "shift_settings.json"
+FULL_TIME_IDXS = [0, 1, 2, 3] 
+NIGHT_IDX = 4
+M1_IDX = 5
+M2_IDX = 6
+
+# --- データ読み込み・初期化関数 ---
+def load_settings_from_file():
+    """サーバー上のファイルから設定を読み込む"""
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                loaded_data = json.load(f)
+            return pd.DataFrame(loaded_data["staff"]), pd.DataFrame(loaded_data["holidays"])
+        except Exception:
+            return None, None
+    return None, None
+
+def get_default_data():
+    """デフォルトデータの生成"""
+    staff_data = {
         "名前": ["正社員A_1", "正社員A_2", "正社員B_1", "正社員B_2", "パート夜", "パート朝1", "パート朝2"],
         "役割(カンマ区切り)": ["A", "A,B,Neko", "B,C,Neko", "B,C,Neko", "Night", "Neko,C", "Neko,C"],
         "先月からの連勤": [0, 5, 1, 0, 0, 2, 2],
         "公休数": [8, 8, 8, 8, 13, 9, 15]
     }
-    st.session_state.staff_df = pd.DataFrame(default_data)
+    # 初期休日データ（7人分）
+    holidays_data = pd.DataFrame(False, index=range(7), columns=[f"Day_{i+1}" for i in range(31)])
+    return pd.DataFrame(staff_data), holidays_data
 
-if 'holidays_df' not in st.session_state:
-    num_staff = len(st.session_state.staff_df)
-    st.session_state.holidays_df = pd.DataFrame(False, index=range(num_staff), columns=[f"Day_{i+1}" for i in range(31)])
-
-# --- 定数 ---
-FULL_TIME_IDXS = [0, 1, 2, 3] 
-NIGHT_IDX = 4
-M1_IDX = 5
-M2_IDX = 6
+# --- セッション状態の初期化 ---
+if 'staff_df' not in st.session_state:
+    # 1. まずサーバー上の保存ファイルを探す
+    loaded_staff, loaded_holidays = load_settings_from_file()
+    
+    if loaded_staff is not None:
+        st.session_state.staff_df = loaded_staff
+        st.session_state.holidays_df = loaded_holidays
+        st.toast("📂 前回の設定を自動読み込みしました！", icon="✅")
+    else:
+        # 2. なければデフォルト
+        d_staff, d_holidays = get_default_data()
+        st.session_state.staff_df = d_staff
+        st.session_state.holidays_df = d_holidays
 
 # --- ロジック関数 ---
 
@@ -68,7 +95,6 @@ def get_possible_day_patterns(available_staff):
 def assign_roles_smartly(working_indices, role_map):
     assignments = {}
     if NIGHT_IDX in working_indices: assignments[NIGHT_IDX] = '〇'
-    
     pool = [s for s in working_indices if s != NIGHT_IDX]
     if not pool: return assignments
     
@@ -82,8 +108,7 @@ def assign_roles_smartly(working_indices, role_map):
         rem = [x for x in pool if x != neko_fixed]
         for p in itertools.permutations(rem, 3):
             if 'A' in role_map[p[0]] and 'B' in role_map[p[1]] and 'C' in role_map[p[2]]:
-                assignments[neko_fixed] = 'ネコ'
-                assignments[p[0]] = 'A'; assignments[p[1]] = 'B'; assignments[p[2]] = 'C'
+                assignments[neko_fixed] = 'ネコ'; assignments[p[0]] = 'A'; assignments[p[1]] = 'B'; assignments[p[2]] = 'C'
                 found_strict = True
                 for ex in rem:
                     if ex not in p:
@@ -109,18 +134,15 @@ def assign_roles_smartly(working_indices, role_map):
 
     unassigned = set(pool)
     for s in pool:
-        if s in unassigned and 'A' in role_map[s]:
-            assignments[s] = 'A'; unassigned.remove(s); break
+        if s in unassigned and 'A' in role_map[s]: assignments[s] = 'A'; unassigned.remove(s); break
     for s in pool:
-        if s in unassigned and 'B' in role_map[s]:
-            assignments[s] = 'B'; unassigned.remove(s); break
+        if s in unassigned and 'B' in role_map[s]: assignments[s] = 'B'; unassigned.remove(s); break
     
     if M1_IDX in unassigned: assignments[M1_IDX] = 'ネコ'; unassigned.remove(M1_IDX)
     elif M2_IDX in unassigned: assignments[M2_IDX] = 'ネコ'; unassigned.remove(M2_IDX)
     else:
         for s in pool:
-            if s in unassigned and 'Neko' in role_map[s]:
-                assignments[s] = 'ネコ'; unassigned.remove(s); break
+            if s in unassigned and 'Neko' in role_map[s]: assignments[s] = 'ネコ'; unassigned.remove(s); break
                 
     for s in list(unassigned):
         caps = role_map[s]
@@ -138,12 +160,10 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     
     num_days = len(days_list)
     num_staff = len(staff_df)
-    
     if num_staff == 0: return None
     
     role_map = {}
     staff_df = staff_df.reset_index(drop=True)
-    
     for i, row in staff_df.iterrows():
         role_map[i] = parse_roles(str(row['役割(カンマ区切り)']))
 
@@ -184,7 +204,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     for d in range(num_days):
         next_paths = []
         patterns = day_patterns[d]
-        
         valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map)]
         invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map)]
         use_patterns = valid_pats[:150] + invalid_pats[:30]
@@ -197,8 +216,7 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                 penalty = 0
                 violation = False
                 
-                if not can_cover_required_roles(pat, role_map):
-                    penalty += 50000
+                if not can_cover_required_roles(pat, role_map): penalty += 50000
                 
                 work_mask = np.zeros(num_staff, dtype=int)
                 for s in pat: work_mask[s] = 1
@@ -220,7 +238,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                             if s == 6: penalty += 200
                 
                 if violation: continue
-                
                 days_left = num_days - 1 - d
                 if np.any(new_offs > req_offs): violation = True
                 if np.any(new_offs + days_left < req_offs): violation = True
@@ -240,7 +257,7 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     best_path = current_paths[0]
     final_sched = best_path['sched']
     
-    # --- 日付ヘッダーの日本語化 ---
+    # 日付ヘッダーの日本語化
     weekdays_jp = ["(月)", "(火)", "(水)", "(木)", "(金)", "(土)", "(日)"]
     output_cols = [f"{d.month}/{d.day}{weekdays_jp[d.weekday()]}" for d in days_list]
     
@@ -250,14 +267,12 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     for d in range(num_days):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
         roles = assign_roles_smartly(working, role_map)
-        
         is_insufficient = False
         if not can_cover_required_roles(working, role_map): is_insufficient = True
         
         for s in range(num_staff):
             if s in working:
-                if s in roles: 
-                    output_data[s, d] = roles[s]
+                if s in roles: output_data[s, d] = roles[s]
                 else:
                     caps = role_map[s]
                     if 'C' in caps: output_data[s, d] = 'C'
@@ -292,51 +307,67 @@ st.title('📅 ブラウザ入力型 シフト作成ツール')
 
 # --- サイドバー ---
 with st.sidebar:
-    st.header("⚙️ 設定・保存")
+    st.header("⚙️ 保存・読込")
     
+    # サーバー保存機能
+    if st.button("💾 現在の設定を保存する", type="primary"):
+        clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
+        clean_staff_df = clean_staff_df[clean_staff_df['名前'] != '']
+        
+        save_data = {
+            "staff": clean_staff_df.to_dict(),
+            "holidays": st.session_state.holidays_df.to_dict()
+        }
+        try:
+            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(save_data, f, ensure_ascii=False, indent=2)
+            st.success("設定をサーバーに保存しました！次回起動時に自動で読み込まれます。")
+        except Exception as e:
+            st.error(f"保存失敗: {e}")
+    
+    st.info("※保存ボタンを押すと、次回このページを開いた時に前回の状態が復元されます（クラウド環境では消える可能性があります）")
+    
+    st.markdown("---")
+    st.header("📅 日付設定")
     today = datetime.date.today()
     next_month = today.replace(day=1) + datetime.timedelta(days=32)
     start_date = next_month.replace(day=1)
     next_month_end = (start_date.replace(day=1) + datetime.timedelta(days=32)).replace(day=1) - datetime.timedelta(days=1)
     
     col_d1, col_d2 = st.columns(2)
-    # カレンダー入力のフォーマット指定（日本語圏向け）
     start_input = col_d1.date_input("開始日", start_date, format="YYYY/MM/DD")
     end_input = col_d2.date_input("終了日", next_month_end, format="YYYY/MM/DD")
-    
-    st.caption("※カレンダーの日付（月火水...）はブラウザの設定言語で表示されます")
-    
     days_list = pd.date_range(start_input, end_input).tolist()
     num_days = len(days_list)
     
     st.markdown("---")
-    st.subheader("💾 データの保存/読込")
+    st.subheader("📥 バックアップ")
+    st.caption("念のため手元にファイルを保存したい場合")
     
-    # 保存時に空行を除去して保存
+    # JSONダウンロード機能
     clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
     clean_staff_df = clean_staff_df[clean_staff_df['名前'] != '']
-    
     current_data = {
         "staff": clean_staff_df.to_dict(),
         "holidays": st.session_state.holidays_df.to_dict()
     }
     json_str = json.dumps(current_data, ensure_ascii=False)
-    st.download_button("設定を保存 (JSON)", json_str, "shift_settings.json", "application/json")
+    st.download_button("設定ファイル(.json)をDL", json_str, "shift_settings.json", "application/json")
     
-    uploaded_json = st.file_uploader("設定を読み込む", type=["json"])
+    uploaded_json = st.file_uploader("設定ファイル読込", type=["json"])
     if uploaded_json is not None:
         try:
             loaded_data = json.load(uploaded_json)
             st.session_state.staff_df = pd.DataFrame(loaded_data["staff"])
             st.session_state.holidays_df = pd.DataFrame(loaded_data["holidays"])
-            st.success("設定を読み込みました！")
+            st.success("ファイルを読み込みました！")
         except:
             st.error("読込エラー")
 
 # --- メインエリア ---
 
 st.markdown("### 1️⃣ スタッフ設定")
-st.info("💡 **行の削除方法**: 左端の番号をクリックして行を選択し、キーボードの **Delete** キー（Macは **Fn+Delete**）を押してください。")
+st.info("💡 **行の削除**: 左端の番号をクリックして選択 → **Deleteキー**で削除")
 
 edited_staff_df = st.data_editor(
     st.session_state.staff_df,
@@ -358,19 +389,17 @@ elif valid_staff_count < current_holiday_rows:
     st.session_state.holidays_df = st.session_state.holidays_df.iloc[:valid_staff_count]
 
 st.markdown("### 2️⃣ 希望休入力")
-st.markdown("希望休（×）がある場合は、チェックボックスをONにしてください。")
+st.markdown("希望休（×）がある場合はチェックしてください。")
 
 holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
 display_holidays_df = st.session_state.holidays_df.reindex(columns=holiday_cols, fill_value=False)
 
-# 名前リスト同期
+# 名前同期
 valid_names = edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")]['名前']
 if len(valid_names) == len(display_holidays_df):
     display_holidays_df.index = valid_names
-else:
-    pass
 
-# チェックボックス列名の日本語曜日化
+# チェックボックス列名
 edited_holidays_grid = st.data_editor(
     display_holidays_df,
     use_container_width=True,

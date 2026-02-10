@@ -23,12 +23,17 @@ M1_IDX = 5
 M2_IDX = 6
 FULL_TIME_IDXS = [0, 1, 2, 3]
 
-# --- 判定関数 ---
+# --- 判定・割り当て関数 ---
+
 def can_cover_required_roles(staff_list):
+    """
+    そのメンバーで最低限の役割（夜勤＋正社員2名、およびA,B,C,ネコ）が満かせるか判定
+    """
     if NIGHT_IDX in staff_list:
         if sum(1 for s in staff_list if s in FULL_TIME_IDXS) < 2: return False
     
     pool = [s for s in staff_list if s != NIGHT_IDX]
+    
     neko_fixed = None
     if M1_IDX in pool: neko_fixed = M1_IDX
     elif M2_IDX in pool: neko_fixed = M2_IDX
@@ -53,53 +58,110 @@ def get_possible_day_patterns(available_staff):
             patterns.append(subset)
     return patterns
 
-def assign_roles_strictly(working_indices):
+def assign_roles_smartly(working_indices):
+    """
+    確定したメンバーに対して、可能な限り適切に役割を割り振る
+    （厳密な解がない場合でも、CばかりにせずAやBを優先的に埋める）
+    """
     assignments = {}
-    if NIGHT_IDX in working_indices: assignments[NIGHT_IDX] = '〇'
+    
+    # 1. 夜勤の割り当て
+    if NIGHT_IDX in working_indices: 
+        assignments[NIGHT_IDX] = '〇'
     
     pool = [s for s in working_indices if s != NIGHT_IDX]
+    if not pool: return assignments
+    
+    # --- 厳密な割り当てを試行 ---
     neko_fixed = None
     if M1_IDX in pool: neko_fixed = M1_IDX
     elif M2_IDX in pool: neko_fixed = M2_IDX
     
-    found = False
+    found_strict = False
     
-    # ネコ役が固定の場合
+    # ネコ固定パターン
     if neko_fixed is not None:
-        assignments[neko_fixed] = 'ネコ'
         rem = [x for x in pool if x != neko_fixed]
-        # A, B, C を割り当て
         for p in itertools.permutations(rem, 3):
             if 'A' in STAFF_ROLES_MAP[p[0]] and 'B' in STAFF_ROLES_MAP[p[1]] and 'C' in STAFF_ROLES_MAP[p[2]]:
+                assignments[neko_fixed] = 'ネコ'
                 assignments[p[0]] = 'A'
                 assignments[p[1]] = 'B'
                 assignments[p[2]] = 'C'
-                found = True
-                # 余った人にも必ず役割を振る
+                found_strict = True
+                
+                # 余り人員の割り当て（Cばかりにしない）
                 for ex in rem:
                     if ex not in p:
-                        if 'C' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'C'
-                        elif 'B' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'B'
-                        elif 'A' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'A'
+                        caps = STAFF_ROLES_MAP[ex]
+                        # AやBができるなら優先的に振る（バランスのため）
+                        # ただし基本はCやフリー枠
+                        if 'C' in caps: assignments[ex] = 'C'
+                        elif 'B' in caps: assignments[ex] = 'B'
+                        elif 'A' in caps: assignments[ex] = 'A'
                 break
     else:
-        # ネコ役を正社員から選ぶ場合
+        # ネコ変動パターン
         for p in itertools.permutations(pool, 4):
             if 'Neko' in STAFF_ROLES_MAP[p[0]] and 'A' in STAFF_ROLES_MAP[p[1]] and 'B' in STAFF_ROLES_MAP[p[2]] and 'C' in STAFF_ROLES_MAP[p[3]]:
                 assignments[p[0]] = 'ネコ'
                 assignments[p[1]] = 'A'
                 assignments[p[2]] = 'B'
                 assignments[p[3]] = 'C'
-                found = True
-                # 余った人にも必ず役割を振る
+                found_strict = True
+                
                 for ex in pool:
                     if ex not in p:
-                        if 'C' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'C'
-                        elif 'B' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'B'
-                        elif 'A' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'A'
+                        caps = STAFF_ROLES_MAP[ex]
+                        if 'C' in caps: assignments[ex] = 'C'
+                        elif 'B' in caps: assignments[ex] = 'B'
+                        elif 'A' in caps: assignments[ex] = 'A'
                 break
     
-    return assignments if found else {}
+    if found_strict:
+        return assignments
+
+    # --- 厳密解がない場合のベストエフォート（Cばかり防衛策） ---
+    # 優先順位: A > B > Neko > C
+    unassigned = set(pool)
+    
+    # 1. Aを埋める
+    for s in pool:
+        if s in unassigned and 'A' in STAFF_ROLES_MAP[s]:
+            assignments[s] = 'A'
+            unassigned.remove(s)
+            break
+            
+    # 2. Bを埋める
+    for s in pool:
+        if s in unassigned and 'B' in STAFF_ROLES_MAP[s]:
+            assignments[s] = 'B'
+            unassigned.remove(s)
+            break
+            
+    # 3. ネコを埋める (M1, M2優先)
+    if M1_IDX in unassigned:
+        assignments[M1_IDX] = 'ネコ'
+        unassigned.remove(M1_IDX)
+    elif M2_IDX in unassigned:
+        assignments[M2_IDX] = 'ネコ'
+        unassigned.remove(M2_IDX)
+    else:
+        for s in pool:
+            if s in unassigned and 'Neko' in STAFF_ROLES_MAP[s]:
+                assignments[s] = 'ネコ'
+                unassigned.remove(s)
+                break
+                
+    # 4. 残りを埋める (C優先だが、BやAも可)
+    for s in list(unassigned): # list化して安全に反復
+        caps = STAFF_ROLES_MAP[s]
+        if 'C' in caps: assignments[s] = 'C'
+        elif 'B' in caps: assignments[s] = 'B'
+        elif 'A' in caps: assignments[s] = 'A'
+        elif 'Neko' in caps: assignments[s] = 'ネコ'
+        
+    return assignments
 
 def solve_schedule(df):
     dates = df.iloc[1, 2:30].values
@@ -124,7 +186,9 @@ def solve_schedule(df):
         'off_cons': np.zeros(num_staff, dtype=int),
         'score': 0
     }]
-    BEAM_WIDTH = 70
+    
+    # 探索幅を拡大（月末の手詰まり防止）
+    BEAM_WIDTH = 150 
     
     for d in range(num_days):
         next_paths = []
@@ -132,7 +196,8 @@ def solve_schedule(df):
         
         valid_pats = [p for p in patterns if can_cover_required_roles(p)]
         invalid_pats = [p for p in patterns if not can_cover_required_roles(p)]
-        use_patterns = valid_pats[:100] + invalid_pats[:20]
+        # 有効なパターンをより多く探索候補に入れる
+        use_patterns = valid_pats[:150] + invalid_pats[:30]
         
         for path in current_paths:
             for pat in use_patterns:
@@ -142,6 +207,7 @@ def solve_schedule(df):
                 penalty = 0
                 violation = False
                 
+                # 不足チェック
                 if not can_cover_required_roles(pat):
                     penalty += 50000 
                 
@@ -191,7 +257,11 @@ def solve_schedule(df):
     
     for d in range(num_days):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
-        roles = assign_roles_strictly(working)
+        
+        # スマート割り当て実行
+        roles = assign_roles_smartly(working)
+        
+        # 不足判定（厳密チェック）
         is_insufficient = False
         if not can_cover_required_roles(working): is_insufficient = True
         
@@ -201,11 +271,10 @@ def solve_schedule(df):
                 if s in roles: 
                     output_df.iloc[r_idx, c_idx] = roles[s]
                 else: 
-                    # 万が一ここに来ても、強制的に役割を割り振る
+                    # 万が一漏れた場合の最終安全策
                     if 'C' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'C'
                     elif 'B' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'B'
-                    elif 'A' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'A'
-                    else: output_df.iloc[r_idx, c_idx] = 'C' # 最終手段
+                    else: output_df.iloc[r_idx, c_idx] = 'C'
             else:
                 output_df.iloc[r_idx, c_idx] = '×' if fixed_shifts[s, d] == '×' else '／'
         

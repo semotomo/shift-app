@@ -5,7 +5,7 @@ import random
 import io
 import itertools
 
-# --- ページ設定 (必ず一番最初に書く必要があります) ---
+# --- ページ設定 ---
 st.set_page_config(page_title="シフト作成ツール", layout="wide")
 
 # --- 設定 ---
@@ -25,13 +25,10 @@ FULL_TIME_IDXS = [0, 1, 2, 3]
 
 # --- 判定関数 ---
 def can_cover_required_roles(staff_list):
-    # 夜勤チェック
     if NIGHT_IDX in staff_list:
         if sum(1 for s in staff_list if s in FULL_TIME_IDXS) < 2: return False
     
     pool = [s for s in staff_list if s != NIGHT_IDX]
-    
-    # ネコチェック
     neko_fixed = None
     if M1_IDX in pool: neko_fixed = M1_IDX
     elif M2_IDX in pool: neko_fixed = M2_IDX
@@ -51,7 +48,6 @@ def can_cover_required_roles(staff_list):
 
 def get_possible_day_patterns(available_staff):
     patterns = []
-    # サイズ3〜7の組み合わせを全列挙
     for size in range(3, 8):
         for subset in itertools.combinations(available_staff, size):
             patterns.append(subset)
@@ -60,34 +56,49 @@ def get_possible_day_patterns(available_staff):
 def assign_roles_strictly(working_indices):
     assignments = {}
     if NIGHT_IDX in working_indices: assignments[NIGHT_IDX] = '〇'
+    
     pool = [s for s in working_indices if s != NIGHT_IDX]
     neko_fixed = None
     if M1_IDX in pool: neko_fixed = M1_IDX
     elif M2_IDX in pool: neko_fixed = M2_IDX
     
     found = False
+    
+    # ネコ役が固定の場合
     if neko_fixed is not None:
         assignments[neko_fixed] = 'ネコ'
         rem = [x for x in pool if x != neko_fixed]
+        # A, B, C を割り当て
         for p in itertools.permutations(rem, 3):
             if 'A' in STAFF_ROLES_MAP[p[0]] and 'B' in STAFF_ROLES_MAP[p[1]] and 'C' in STAFF_ROLES_MAP[p[2]]:
-                assignments[p[0]] = 'A'; assignments[p[1]] = 'B'; assignments[p[2]] = 'C'
+                assignments[p[0]] = 'A'
+                assignments[p[1]] = 'B'
+                assignments[p[2]] = 'C'
                 found = True
+                # 余った人にも必ず役割を振る
                 for ex in rem:
                     if ex not in p:
                         if 'C' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'C'
                         elif 'B' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'B'
+                        elif 'A' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'A'
                 break
     else:
+        # ネコ役を正社員から選ぶ場合
         for p in itertools.permutations(pool, 4):
             if 'Neko' in STAFF_ROLES_MAP[p[0]] and 'A' in STAFF_ROLES_MAP[p[1]] and 'B' in STAFF_ROLES_MAP[p[2]] and 'C' in STAFF_ROLES_MAP[p[3]]:
-                assignments[p[0]] = 'ネコ'; assignments[p[1]] = 'A'; assignments[p[2]] = 'B'; assignments[p[3]] = 'C'
+                assignments[p[0]] = 'ネコ'
+                assignments[p[1]] = 'A'
+                assignments[p[2]] = 'B'
+                assignments[p[3]] = 'C'
                 found = True
+                # 余った人にも必ず役割を振る
                 for ex in pool:
                     if ex not in p:
                         if 'C' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'C'
                         elif 'B' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'B'
+                        elif 'A' in STAFF_ROLES_MAP[ex]: assignments[ex] = 'A'
                 break
+    
     return assignments if found else {}
 
 def solve_schedule(df):
@@ -187,11 +198,14 @@ def solve_schedule(df):
         for s in range(num_staff):
             r_idx = 3 + s; c_idx = 2 + d
             if s in working:
-                if s in roles: output_df.iloc[r_idx, c_idx] = roles[s]
+                if s in roles: 
+                    output_df.iloc[r_idx, c_idx] = roles[s]
                 else: 
+                    # 万が一ここに来ても、強制的に役割を割り振る
                     if 'C' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'C'
                     elif 'B' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'B'
-                    else: output_df.iloc[r_idx, c_idx] = '出勤'
+                    elif 'A' in STAFF_ROLES_MAP[s]: output_df.iloc[r_idx, c_idx] = 'A'
+                    else: output_df.iloc[r_idx, c_idx] = 'C' # 最終手段
             else:
                 output_df.iloc[r_idx, c_idx] = '×' if fixed_shifts[s, d] == '×' else '／'
         
@@ -203,21 +217,21 @@ def solve_schedule(df):
 # --- スタイリング関数 ---
 def highlight_cells(val):
     if val == '／':
-        return 'background-color: #ffcccc; color: black' # 休み（薄い赤）
+        return 'background-color: #ffcccc; color: black'
     elif val == '×':
-        return 'background-color: #d9d9d9; color: gray'  # 希望休（グレー）
+        return 'background-color: #d9d9d9; color: gray'
     elif val == '※':
-        return 'background-color: #ff0000; color: white; font-weight: bold' # 不足（真っ赤）
+        return 'background-color: #ff0000; color: white; font-weight: bold'
     elif val == 'A':
-        return 'background-color: #ccffff; color: black' # A（水色）
+        return 'background-color: #ccffff; color: black'
     elif val == 'B':
-        return 'background-color: #ccffcc; color: black' # B（薄緑）
+        return 'background-color: #ccffcc; color: black'
     elif val == 'C':
-        return 'background-color: #ffffcc; color: black' # C（薄黄色）
+        return 'background-color: #ffffcc; color: black'
     elif val == 'ネコ':
-        return 'background-color: #ffe5cc; color: black' # ネコ（薄オレンジ）
+        return 'background-color: #ffe5cc; color: black'
     elif val == '〇':
-        return 'background-color: #e6e6fa; color: black' # パート夜（薄紫）
+        return 'background-color: #e6e6fa; color: black'
     return ''
 
 # --- Webアプリ画面 ---
@@ -235,29 +249,21 @@ if uploaded_file is not None:
     st.info("計算中... 最適なシフトパズルを解いています🧩")
     
     try:
-        # CSV読み込み
         df_input = pd.read_csv(uploaded_file, header=None)
-        
-        # 計算実行
         result_df = solve_schedule(df_input)
         
         if result_df is not None:
             st.success("✨ 作成完了！")
             
-            # 画面表示用のデータ整形
             display_df = result_df.fillna("")
-            
-            # スタイリング適用
             styled_df = display_df.style.map(highlight_cells)
             
-            # 画面いっぱいにテーブルを表示
             st.dataframe(
                 styled_df,
                 use_container_width=True,
                 height=600
             )
             
-            # CSVダウンロードボタン
             csv = result_df.to_csv(index=False, header=False).encode('utf-8-sig')
             st.download_button(
                 label="📥 シフト表をダウンロード (CSV)",

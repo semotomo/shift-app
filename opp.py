@@ -10,17 +10,15 @@ import os
 # --- ページ設定 ---
 st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
 
-# --- CSS設定（限界まで幅を詰める） ---
+# --- CSS設定（幅詰め） ---
 st.markdown("""
 <style>
     .stDataFrame { width: 100% !important; }
-    /* セルの余白を極小にして中央揃え */
     th, td {
         padding: 2px 4px !important;
         font-size: 13px !important;
         text-align: center !important; 
     }
-    /* スタッフ設定用の幅固定 */
     th[aria-label="朝"], td[aria-label="朝"] { max-width: 25px !important; min-width: 25px !important;}
     th[aria-label="夜"], td[aria-label="夜"] { max-width: 25px !important; min-width: 25px !important;}
     th[aria-label="A"], td[aria-label="A"] { max-width: 25px !important; min-width: 25px !important;}
@@ -32,6 +30,25 @@ st.markdown("""
 
 # --- 定数 ---
 SETTINGS_FILE = "shift_settings.json"
+
+# --- 祝日判定関数 ---
+def is_holiday(d):
+    try:
+        import jpholiday
+        if jpholiday.is_holiday(d): return True
+    except ImportError:
+        pass
+    # jpholidayがない場合の2026年祝日フォールバック
+    holidays_2026 = [
+        datetime.date(2026, 1, 1), datetime.date(2026, 1, 12),
+        datetime.date(2026, 2, 11), datetime.date(2026, 2, 23),
+        datetime.date(2026, 3, 20), datetime.date(2026, 4, 29),
+        datetime.date(2026, 5, 3), datetime.date(2026, 5, 4), datetime.date(2026, 5, 5), datetime.date(2026, 5, 6),
+        datetime.date(2026, 7, 20), datetime.date(2026, 8, 11),
+        datetime.date(2026, 9, 21), datetime.date(2026, 9, 22), datetime.date(2026, 9, 23),
+        datetime.date(2026, 10, 12), datetime.date(2026, 11, 3), datetime.date(2026, 11, 23)
+    ]
+    return d in holidays_2026
 
 # --- データ読み込み・初期化関数 ---
 def load_settings_from_file():
@@ -273,27 +290,23 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         current_paths = next_paths[:BEAM_WIDTH]
     best_path = current_paths[0]; final_sched = best_path['sched']
     
-    # ---------------------------------------------------------
-    # 日付と曜日を2段（MultiIndex）にして名前もデータとして出力
-    # ---------------------------------------------------------
+    # --- ヘッダー作成（MultiIndexで2段にする） ---
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    top_level = ["名前"] + [str(d.day) for d in days_list]
     
-    # 上段：日にち（26, 27...）
-    top_level = ["日にち"] + [str(d.day) for d in days_list]
-    # 下段：曜日（木, 金...）
-    bottom_level = ["曜日"] + [weekdays_jp[d.weekday()] for d in days_list]
-    
-    # 2段ヘッダーの作成
+    # 曜日・祝日判定
+    bottom_level = [""]
+    for d in days_list:
+        if is_holiday(d): bottom_level.append("祝")
+        else: bottom_level.append(weekdays_jp[d.weekday()])
+        
     multi_cols = pd.MultiIndex.from_arrays([top_level, bottom_level])
     
-    # データ格納用（列が1つ増えるので num_days + 1）
     output_data = np.full((num_staff + 1, num_days + 1), "", dtype=object)
     insufficient_row_idx = num_staff
     
-    # 名前を1列目にセット（インデックスではなくデータとして）
     names_list = list(staff_df['名前'])
-    for s in range(num_staff):
-        output_data[s, 0] = names_list[s]
+    for s in range(num_staff): output_data[s, 0] = names_list[s]
     output_data[insufficient_row_idx, 0] = "不足"
     
     for d in range(num_days):
@@ -315,6 +328,7 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         
     return pd.DataFrame(output_data, columns=multi_cols)
 
+# セルの色付け
 def highlight_cells(val):
     if val == '／': return 'background-color: #ffcccc; color: black'
     elif val == '×': return 'background-color: #d9d9d9; color: gray'
@@ -325,6 +339,15 @@ def highlight_cells(val):
     elif val == 'ネコ': return 'background-color: #ffe5cc; color: black'
     elif val == '〇': return 'background-color: #e6e6fa; color: black'
     return ''
+
+# ヘッダー（曜日）の色付け（HTML出力用）
+def style_header(idx):
+    return [
+        "background-color: #cce5ff; color: #000;" if v == "土"
+        else "background-color: #ffcccc; color: #000;" if v in ["日", "祝"]
+        else ""
+        for v in idx
+    ]
 
 # ==========================================
 # UI実装
@@ -412,6 +435,7 @@ with st.form("settings_form"):
         st.session_state.staff_df,
         num_rows="dynamic",
         use_container_width=True,
+        hide_index=True,
         key="staff_editor",
         column_config={
             "朝可": st.column_config.CheckboxColumn("朝", width="small", default=True),
@@ -432,24 +456,37 @@ with st.form("settings_form"):
     temp_holidays = st.session_state.holidays_df.copy()
     display_holidays_df = temp_holidays.reindex(columns=holiday_cols, fill_value=False)
     
-    # 【重要】名前を1列目に固定して表示
     if len(display_holidays_df) == len(st.session_state.staff_df):
         valid_names = st.session_state.staff_df['名前'].values
         display_holidays_df.insert(0, "名前", valid_names)
     else:
         display_holidays_df.insert(0, "名前", [""] * len(display_holidays_df))
 
-    # 【重要】希望休も2段ヘッダー（MultiIndex）にする
+    # 希望休を2段ヘッダー（MultiIndex）に
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     top_level_h = ["名前"] + [str(d.day) for d in days_list]
-    bottom_level_h = [""] + [weekdays_jp[d.weekday()] for d in days_list]
+    bottom_level_h = [""]
+    for d in days_list:
+        if is_holiday(d): bottom_level_h.append("祝")
+        else: bottom_level_h.append(weekdays_jp[d.weekday()])
+        
     display_holidays_df.columns = pd.MultiIndex.from_arrays([top_level_h, bottom_level_h])
+
+    # 列設定（幅と名前の固定）
+    col_config_holidays = {
+        ("名前", ""): st.column_config.TextColumn("名前", disabled=True, width="medium")
+    }
+    for i, d in enumerate(days_list):
+        day_str = str(d.day)
+        week_str = "祝" if is_holiday(d) else weekdays_jp[d.weekday()]
+        col_config_holidays[(day_str, week_str)] = st.column_config.CheckboxColumn(width="small", default=False)
 
     edited_holidays_grid = st.data_editor(
         display_holidays_df,
         use_container_width=True,
-        hide_index=True, # 左のマークを完全消去
-        key="holidays_editor"
+        hide_index=True, 
+        key="holidays_editor",
+        column_config=col_config_holidays
     )
     submit_btn = st.form_submit_button("✅ 設定を反映して保存", type="primary")
 
@@ -457,9 +494,8 @@ if submit_btn:
     st.session_state.staff_df = edited_staff_df
     valid_staff_count = len(edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")])
     
-    # 内部データ保存用に列名と「名前」を整理
     new_holidays = edited_holidays_grid.drop(columns=[("名前", "")])
-    new_holidays.columns = holiday_cols # Day_1, Day_2... に戻す
+    new_holidays.columns = holiday_cols 
     current_holiday_rows = len(new_holidays)
     
     if valid_staff_count > current_holiday_rows:
@@ -481,19 +517,73 @@ if st.button("シフトを作成する"):
             if result_df is not None:
                 st.success("作成完了！")
                 
-                # シフト表のタイトル表示
                 month_title = f"{days_list[0].month}月度 シフト表"
                 st.subheader(month_title)
                 
-                styled_df = result_df.fillna("").style.map(highlight_cells)
-                st.dataframe(
-                    styled_df, 
-                    use_container_width=True, 
-                    height=600,
-                    hide_index=True # 左のマークを完全消去
-                )
+                # --- カスタムHTMLテーブルの生成（ヘッダー色付け・左列固定対応） ---
+                # PandasのStylerを使用してデータセルの色とヘッダーの色を適用
+                try:
+                    styled_df = result_df.style \
+                        .map(highlight_cells) \
+                        .apply_index(style_header, axis=1, level=1)
+                except AttributeError:
+                    # Pandasバージョンが古い場合のフォールバック（applymap）
+                    styled_df = result_df.style \
+                        .applymap(highlight_cells) \
+                        .apply_index(style_header, axis=1, level=1)
                 
-                # CSVダウンロード（名前も含めて綺麗に2段ヘッダーで保存されます）
+                html_table = styled_df.to_html(index=False, escape=False)
+                
+                # スクロールと固定表示のためのCSS
+                custom_css = """
+                <style>
+                .shift-table-container {
+                    overflow-x: auto;
+                    max-width: 100%;
+                    border: 1px solid #ddd;
+                    border-radius: 5px;
+                }
+                .shift-table-container table {
+                    border-collapse: collapse;
+                    width: max-content;
+                    font-size: 13px;
+                    text-align: center;
+                }
+                .shift-table-container th, .shift-table-container td {
+                    border: 1px solid #ddd;
+                    padding: 6px 4px;
+                    min-width: 32px;
+                }
+                /* ヘッダー全体の設定 */
+                .shift-table-container thead th {
+                    position: sticky;
+                    top: 0;
+                    z-index: 2;
+                    background-color: #f0f2f6; /* デフォルト背景 */
+                }
+                /* 左端の名前列を固定 */
+                .shift-table-container tbody td:first-child {
+                    position: sticky;
+                    left: 0;
+                    background-color: #fff;
+                    z-index: 3;
+                    font-weight: bold;
+                    min-width: 100px;
+                }
+                .shift-table-container thead th:first-child {
+                    position: sticky;
+                    left: 0;
+                    z-index: 4;
+                }
+                </style>
+                """
+                
+                # StreamlitにHTMLを描画
+                st.markdown(f"{custom_css}<div class='shift-table-container'>{html_table}</div>", unsafe_allow_html=True)
+                
+                st.markdown("<br>", unsafe_allow_html=True) # 少し余白
+                
+                # CSVダウンロード（MultiIndex維持）
                 csv = result_df.to_csv(index=False).encode('utf-8-sig') 
                 st.download_button("CSVダウンロード", csv, "shift_result.csv", "text/csv")
             else:

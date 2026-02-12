@@ -19,7 +19,6 @@ st.markdown("""
         font-size: 13px !important;
         text-align: center !important; 
     }
-    /* データエディタのヘッダーで改行を有効にするおまじない */
     div[data-testid="stDataFrame"] th {
         white-space: pre-wrap !important;
         vertical-align: bottom !important;
@@ -29,7 +28,6 @@ st.markdown("""
         white-space: pre-wrap !important;
         display: inline-block !important;
     }
-    /* スタッフ設定列の幅固定 */
     th[aria-label="社員"], td[aria-label="社員"],
     th[aria-label="朝"], td[aria-label="朝"],
     th[aria-label="夜"], td[aria-label="夜"],
@@ -52,7 +50,6 @@ def is_holiday(d):
         if jpholiday.is_holiday(d): return True
     except ImportError:
         pass
-    # 2026年祝日フォールバック
     holidays_2026 = [
         datetime.date(2026, 1, 1), datetime.date(2026, 1, 12),
         datetime.date(2026, 2, 11), datetime.date(2026, 2, 23),
@@ -71,7 +68,6 @@ def load_settings_from_file():
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
             staff_df = pd.DataFrame(loaded_data["staff"])
-            # 列の存在チェックと初期値補完
             for col in ["正社員", "朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
                 if col not in staff_df.columns:
                     if col == "最大連勤": staff_df[col] = 4
@@ -227,7 +223,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
     max_cons_limits = pd.to_numeric(staff_df['最大連勤'], errors='coerce').fillna(4).astype(int).values
     
-    # 正社員フラグの取得
     is_seishain = staff_df['正社員'].astype(bool).values
     
     fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
@@ -244,7 +239,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         random.shuffle(pats)
         day_patterns.append(pats)
         
-    # weekend_offs: 各スタッフの土日休み回数をカウントする配列を追加
     current_paths = [{
         'sched': np.zeros((num_staff, num_days), dtype=int), 
         'cons': initial_cons.copy(), 
@@ -256,7 +250,7 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     
     BEAM_WIDTH = 200
     for d in range(num_days):
-        is_weekend = days_list[d].weekday() >= 5 # 土曜日(5)または日曜日(6)
+        is_weekend = days_list[d].weekday() >= 5 
         next_paths = []
         patterns = day_patterns[d]
         valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map)]
@@ -285,13 +279,9 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                         elif new_cons[s] == limit: penalty += 50
                     else:
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
-                        
-                        # 【新規ロジック】正社員が土日に休む場合
                         if is_weekend and is_seishain[s]:
                             new_weekend_offs[s] += 1
-                            if new_weekend_offs[s] > 1:
-                                penalty += 500 # 月に2回目以降の土日休みは極力避けるためのペナルティ
-                        
+                            if new_weekend_offs[s] > 1: penalty += 500 
                         if new_off_cons[s] >= 3:
                             penalty += 100
                             if "Neko" in role_map[s] and "C" in role_map[s] and "A" not in role_map[s]: penalty += 200
@@ -314,13 +304,15 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         
     best_path = current_paths[0]; final_sched = best_path['sched']
     
-    # --- 完成シフト表の構築（名前はインデックスとして管理） ---
+    # --- 完成シフト表の構築（列追加） ---
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    top_level = [str(d.day) for d in days_list]
-    bottom_level = ["祝" if is_holiday(d) else weekdays_jp[d.weekday()] for d in days_list]
+    # ヘッダーに「勤(休)」を追加
+    top_level = [str(d.day) for d in days_list] + ["勤(休)"]
+    bottom_level = ["祝" if is_holiday(d) else weekdays_jp[d.weekday()] for d in days_list] + [""]
     multi_cols = pd.MultiIndex.from_arrays([top_level, bottom_level])
     
-    output_data = np.full((num_staff + 1, num_days), "", dtype=object)
+    # データ格納用（列数を +1 する）
+    output_data = np.full((num_staff + 1, num_days + 1), "", dtype=object)
     
     for d in range(num_days):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
@@ -335,6 +327,14 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                     output_data[s, d] = 'C' if 'C' in caps else ('B' if 'B' in caps else ('A' if 'A' in caps else 'C'))
             else: output_data[s, d] = '×' if fixed_shifts[s, d] == '×' else '／'
         if is_insufficient: output_data[num_staff, d] = "※"
+    
+    # --- 「勤(休)」列の計算 ---
+    for s in range(num_staff):
+        shifts = output_data[s, :num_days]
+        off_count = sum(1 for x in shifts if x in ['／', '×'])
+        work_count = num_days - off_count
+        output_data[s, num_days] = f"{work_count}({off_count})"
+    output_data[num_staff, num_days] = "" # 不足行は空欄
         
     index_names = list(staff_df['名前']) + ["不足"]
     return pd.DataFrame(output_data, columns=multi_cols, index=index_names)
@@ -355,10 +355,10 @@ def generate_custom_csv(result_df, staff_df, days_list):
             current_m = d.month
             count = 1
             row1.append(f"　{current_m}月 ")
-    row1.append("")
+    row1.append("") # 勤(休)用の空セル
     
     # 2行目：日にち
-    row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["休み日数"]
+    row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["勤(休)"]
     
     # 3行目：曜日
     row3 = ["\"先月からの\n連勤日数\"", "曜日"]
@@ -374,9 +374,8 @@ def generate_custom_csv(result_df, staff_df, days_list):
     for name, row in result_df.iterrows():
         if name == "不足": continue
         p_cons = prev_cons_map.get(name, 0)
-        shifts = row.values
-        off_count = sum(1 for x in shifts if x in ['／', '×'])
-        data_rows.append([str(p_cons), name] + list(shifts) + [str(off_count)])
+        # row.values にはシフトに加えて最後に「20(10)」が含まれているのでそのまま結合
+        data_rows.append([str(p_cons), name] + list(row.values))
         
     lines = [",".join(row1), ",".join(row2), ",".join(row3)]
     for dr in data_rows: lines.append(",".join([str(x) for x in dr]))
@@ -394,14 +393,19 @@ def highlight_cells(data):
     for r in data.index:
         for c in data.columns:
             val = data.at[r, c]
-            if val == '／': styles.at[r, c] = 'background-color: #ffcccc; color: black;'
-            elif val == '×': styles.at[r, c] = 'background-color: #d9d9d9; color: gray;'
-            elif val == '※': styles.at[r, c] = 'background-color: #ff0000; color: white; font-weight: bold;'
-            elif val == 'A': styles.at[r, c] = 'background-color: #ccffff; color: black;'
-            elif val == 'B': styles.at[r, c] = 'background-color: #ccffcc; color: black;'
-            elif val == 'C': styles.at[r, c] = 'background-color: #ffffcc; color: black;'
-            elif val == 'ネコ': styles.at[r, c] = 'background-color: #ffe5cc; color: black;'
-            elif val == '〇': styles.at[r, c] = 'background-color: #e6e6fa; color: black;'
+            # 勤休列のスタイル例外処理
+            if c[0] == '勤(休)':
+                styles.at[r, c] += 'font-weight: bold; background-color: #f9f9f9;'
+                continue
+            
+            if val == '／': styles.at[r, c] += 'background-color: #ffcccc; color: black;'
+            elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
+            elif val == '※': styles.at[r, c] += 'background-color: #ff0000; color: white; font-weight: bold;'
+            elif val == 'A': styles.at[r, c] += 'background-color: #ccffff; color: black;'
+            elif val == 'B': styles.at[r, c] += 'background-color: #ccffcc; color: black;'
+            elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
+            elif val == 'ネコ': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
+            elif val == '〇': styles.at[r, c] += 'background-color: #e6e6fa; color: black;'
             
     return styles
 

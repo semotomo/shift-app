@@ -30,6 +30,7 @@ st.markdown("""
         display: inline-block !important;
     }
     /* スタッフ設定列の幅固定 */
+    th[aria-label="社員"], td[aria-label="社員"],
     th[aria-label="朝"], td[aria-label="朝"],
     th[aria-label="夜"], td[aria-label="夜"],
     th[aria-label="A"], td[aria-label="A"],
@@ -70,9 +71,12 @@ def load_settings_from_file():
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
             staff_df = pd.DataFrame(loaded_data["staff"])
-            for col in ["朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
+            # 列の存在チェックと初期値補完
+            for col in ["正社員", "朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
                 if col not in staff_df.columns:
                     if col == "最大連勤": staff_df[col] = 4
+                    elif col == "正社員": staff_df[col] = False
+                    elif col == "朝可": staff_df[col] = True
                     else: staff_df[col] = False
             start_d, end_d = None, None
             if "date_range" in loaded_data:
@@ -95,6 +99,7 @@ def get_default_date_range():
 def get_default_data():
     staff_data = {
         "名前": ["正社員A_1", "正社員A_2", "正社員B_1", "正社員B_2", "パート夜", "パート朝1", "パート朝2"],
+        "正社員": [True, True, True, True, False, False, False],
         "朝可": [True, True, True, True, False, True, True],
         "夜可": [True, True, True, True, True, False, False], 
         "A": [True, True, False, False, False, False, False],
@@ -222,6 +227,9 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
     max_cons_limits = pd.to_numeric(staff_df['最大連勤'], errors='coerce').fillna(4).astype(int).values
     
+    # 正社員フラグの取得
+    is_seishain = staff_df['正社員'].astype(bool).values
+    
     fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
     for d_idx in range(num_days):
         col_name = f"Day_{d_idx+1}"
@@ -236,9 +244,19 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         random.shuffle(pats)
         day_patterns.append(pats)
         
-    current_paths = [{'sched': np.zeros((num_staff, num_days), dtype=int), 'cons': initial_cons.copy(), 'offs': np.zeros(num_staff, dtype=int), 'off_cons': np.zeros(num_staff, dtype=int), 'score': 0}]
+    # weekend_offs: 各スタッフの土日休み回数をカウントする配列を追加
+    current_paths = [{
+        'sched': np.zeros((num_staff, num_days), dtype=int), 
+        'cons': initial_cons.copy(), 
+        'offs': np.zeros(num_staff, dtype=int), 
+        'off_cons': np.zeros(num_staff, dtype=int), 
+        'weekend_offs': np.zeros(num_staff, dtype=int),
+        'score': 0
+    }]
+    
     BEAM_WIDTH = 200
     for d in range(num_days):
+        is_weekend = days_list[d].weekday() >= 5 # 土曜日(5)または日曜日(6)
         next_paths = []
         patterns = day_patterns[d]
         valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map)]
@@ -247,7 +265,11 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         
         for path in current_paths:
             for pat in use_patterns:
-                new_cons, new_offs, new_off_cons = path['cons'].copy(), path['offs'].copy(), path['off_cons'].copy()
+                new_cons = path['cons'].copy()
+                new_offs = path['offs'].copy()
+                new_off_cons = path['off_cons'].copy()
+                new_weekend_offs = path['weekend_offs'].copy()
+                
                 penalty, violation = 0, False
                 if not can_cover_required_roles(pat, role_map): penalty += 50000
                 work_mask = np.zeros(num_staff, dtype=int)
@@ -263,16 +285,28 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                         elif new_cons[s] == limit: penalty += 50
                     else:
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
+                        
+                        # 【新規ロジック】正社員が土日に休む場合
+                        if is_weekend and is_seishain[s]:
+                            new_weekend_offs[s] += 1
+                            if new_weekend_offs[s] > 1:
+                                penalty += 500 # 月に2回目以降の土日休みは極力避けるためのペナルティ
+                        
                         if new_off_cons[s] >= 3:
                             penalty += 100
                             if "Neko" in role_map[s] and "C" in role_map[s] and "A" not in role_map[s]: penalty += 200
+                
                 if violation: continue
                 days_left = num_days - 1 - d
                 if np.any(new_offs > req_offs) or np.any(new_offs + days_left < req_offs): continue
                 expected = req_offs * ((d+1)/num_days)
                 penalty += np.sum(np.abs(new_offs - expected)) * 10
                 new_sched = path['sched'].copy(); new_sched[:, d] = work_mask
-                next_paths.append({'sched': new_sched, 'cons': new_cons, 'offs': new_offs, 'off_cons': new_off_cons, 'score': path['score'] + penalty})
+                
+                next_paths.append({
+                    'sched': new_sched, 'cons': new_cons, 'offs': new_offs, 
+                    'off_cons': new_off_cons, 'weekend_offs': new_weekend_offs, 'score': path['score'] + penalty
+                })
         
         next_paths.sort(key=lambda x: x['score'])
         if not next_paths: return None
@@ -306,11 +340,10 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     return pd.DataFrame(output_data, columns=multi_cols, index=index_names)
 
 # --- カスタムCSV出力ジェネレーター ---
-# 画像のフォーマットに完全一致するCSV文字列を生成します
 def generate_custom_csv(result_df, staff_df, days_list):
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     
-    # 1行目：本店、2月、3月...
+    # 1行目：本店、月表示
     row1 = ["", "本店"]
     current_m = days_list[0].month
     count = 0
@@ -322,12 +355,12 @@ def generate_custom_csv(result_df, staff_df, days_list):
             current_m = d.month
             count = 1
             row1.append(f"　{current_m}月 ")
-    row1.append("") # 休み日数用スペース
+    row1.append("")
     
-    # 2行目：日にち、26, 27...
+    # 2行目：日にち
     row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["休み日数"]
     
-    # 3行目：先月連勤、曜日、木, 金...
+    # 3行目：曜日
     row3 = ["\"先月からの\n連勤日数\"", "曜日"]
     for d in days_list:
         row3.append("祝" if is_holiday(d) else weekdays_jp[d.weekday()])
@@ -349,17 +382,15 @@ def generate_custom_csv(result_df, staff_df, days_list):
     for dr in data_rows: lines.append(",".join([str(x) for x in dr]))
     return "\n".join(lines).encode('utf-8-sig')
 
-# --- 新しいカラーリングロジック（列全体＋セル個別） ---
+# --- カラーリングロジック ---
 def highlight_cells(data):
     styles = pd.DataFrame('', index=data.index, columns=data.columns)
     
-    # 1. まずは列全体（縦一列）の背景色を設定
     for col in data.columns:
         week_str = col[1]
-        if week_str == '土': styles[col] = 'background-color: #e6f7ff;' # 薄い青
-        elif week_str in ['日', '祝']: styles[col] = 'background-color: #ffe6e6;' # 薄い赤
+        if week_str == '土': styles[col] = 'background-color: #e6f7ff;'
+        elif week_str in ['日', '祝']: styles[col] = 'background-color: #ffe6e6;'
             
-    # 2. セル個別のデータに応じて色を上書き
     for r in data.index:
         for c in data.columns:
             val = data.at[r, c]
@@ -415,8 +446,12 @@ with st.sidebar:
         try:
             loaded_data = json.load(uploaded_json)
             df_new = pd.DataFrame(loaded_data["staff"])
-            for col in ["朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
-                if col not in df_new.columns: df_new[col] = 4 if col == "最大連勤" else False
+            for col in ["正社員", "朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
+                if col not in df_new.columns:
+                    if col == "最大連勤": df_new[col] = 4
+                    elif col == "正社員": df_new[col] = False
+                    elif col == "朝可": df_new[col] = True
+                    else: df_new[col] = False
             if "先月からの連勤" in df_new.columns: df_new["前月末の連勤数"] = df_new["先月からの連勤"]
             st.session_state.staff_df = df_new
             st.session_state.holidays_df = pd.DataFrame(loaded_data["holidays"])
@@ -435,6 +470,7 @@ with st.form("settings_form"):
     edited_staff_df = st.data_editor(
         st.session_state.staff_df, num_rows="dynamic", use_container_width=True, hide_index=True, key="staff_editor",
         column_config={
+            "正社員": st.column_config.CheckboxColumn("社員", width="small", default=False),
             "朝可": st.column_config.CheckboxColumn("朝", width="small", default=True),
             "夜可": st.column_config.CheckboxColumn("夜", width="small", default=False),
             "A": st.column_config.CheckboxColumn("A", width="small", default=False),
@@ -452,7 +488,6 @@ with st.form("settings_form"):
     holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
     display_holidays_df = st.session_state.holidays_df.copy().reindex(columns=holiday_cols, fill_value=False)
     
-    # 【改行トリック】でUI上だけ2段に見せる
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     ui_cols = ["名前"]
     for d in days_list:
@@ -493,11 +528,9 @@ if st.button("シフトを作成する"):
                 st.success("作成完了！")
                 st.subheader(f"{days_list[0].month}月度 シフト表")
                 
-                # --- 美しいネイティブ表示 ＆ 列全体の色付け ---
                 styled_df = result_df.style.apply(highlight_cells, axis=None)
                 st.dataframe(styled_df, use_container_width=True, height=600)
                 
-                # --- 神エクセルCSV出力 ---
                 csv_data = generate_custom_csv(result_df, st.session_state.staff_df, days_list)
                 st.download_button("📥 CSVダウンロード (エクセル完全対応版)", csv_data, "shift_result.csv", "text/csv")
             else:

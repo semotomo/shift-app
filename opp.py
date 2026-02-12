@@ -10,7 +10,7 @@ import os
 # --- ページ設定 ---
 st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
 
-# --- CSS設定（幅詰め） ---
+# --- CSS設定（ヘッダー改行と幅詰め） ---
 st.markdown("""
 <style>
     .stDataFrame { width: 100% !important; }
@@ -19,16 +19,25 @@ st.markdown("""
         font-size: 13px !important;
         text-align: center !important; 
     }
-    /* ヘッダーの改行を有効化 */
-    th {
+    /* データエディタのヘッダーで改行を有効にするおまじない */
+    div[data-testid="stDataFrame"] th {
         white-space: pre-wrap !important;
+        vertical-align: bottom !important;
+        line-height: 1.3 !important;
     }
-    th[aria-label="朝"], td[aria-label="朝"] { max-width: 25px !important; min-width: 25px !important;}
-    th[aria-label="夜"], td[aria-label="夜"] { max-width: 25px !important; min-width: 25px !important;}
-    th[aria-label="A"], td[aria-label="A"] { max-width: 25px !important; min-width: 25px !important;}
-    th[aria-label="B"], td[aria-label="B"] { max-width: 25px !important; min-width: 25px !important;}
-    th[aria-label="C"], td[aria-label="C"] { max-width: 25px !important; min-width: 25px !important;}
-    th[aria-label="🐱"], td[aria-label="🐱"] { max-width: 25px !important; min-width: 25px !important;}
+    div[data-testid="stDataFrame"] th span {
+        white-space: pre-wrap !important;
+        display: inline-block !important;
+    }
+    /* スタッフ設定列の幅固定 */
+    th[aria-label="朝"], td[aria-label="朝"],
+    th[aria-label="夜"], td[aria-label="夜"],
+    th[aria-label="A"], td[aria-label="A"],
+    th[aria-label="B"], td[aria-label="B"],
+    th[aria-label="C"], td[aria-label="C"],
+    th[aria-label="🐱"], td[aria-label="🐱"] {
+        max-width: 25px !important; min-width: 25px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,6 +51,7 @@ def is_holiday(d):
         if jpholiday.is_holiday(d): return True
     except ImportError:
         pass
+    # 2026年祝日フォールバック
     holidays_2026 = [
         datetime.date(2026, 1, 1), datetime.date(2026, 1, 12),
         datetime.date(2026, 2, 11), datetime.date(2026, 2, 23),
@@ -53,7 +63,7 @@ def is_holiday(d):
     ]
     return d in holidays_2026
 
-# --- データ読み込み・初期化関数 ---
+# --- データ読み込み・初期化 ---
 def load_settings_from_file():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -62,9 +72,7 @@ def load_settings_from_file():
             staff_df = pd.DataFrame(loaded_data["staff"])
             for col in ["朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
                 if col not in staff_df.columns:
-                    if col == "朝可": staff_df[col] = True
-                    elif col == "夜可": staff_df[col] = False
-                    elif col == "最大連勤": staff_df[col] = 4
+                    if col == "最大連勤": staff_df[col] = 4
                     else: staff_df[col] = False
             start_d, end_d = None, None
             if "date_range" in loaded_data:
@@ -129,22 +137,16 @@ def get_role_map_from_df(staff_df):
     return role_map
 
 def can_cover_required_roles(staff_list, role_map):
-    night_capable_count = sum(1 for s in staff_list if "Night" in role_map[s])
-    if night_capable_count < 3: return False
+    if sum(1 for s in staff_list if "Night" in role_map[s]) < 3: return False
     
     neko_cands = [s for s in staff_list if "Neko" in role_map[s]]
     p_neko = [s for s in neko_cands if "A" not in role_map[s] and "B" not in role_map[s]]
-    
-    neko_fixed = None
-    if p_neko: neko_fixed = p_neko[0]
-    elif neko_cands: neko_fixed = neko_cands[0]
+    neko_fixed = p_neko[0] if p_neko else (neko_cands[0] if neko_cands else None)
     
     if neko_fixed is not None:
         rem = [x for x in staff_list if x != neko_fixed]
         if len(rem) < 3: return False
-        if not any("A" in role_map[x] for x in rem): return False
-        if not any("B" in role_map[x] for x in rem): return False
-        if not any("C" in role_map[x] for x in rem): return False
+        if not all(any(r in role_map[x] for x in rem) for r in ["A", "B", "C"]): return False
         for p in itertools.permutations(rem, 3):
              if 'A' in role_map[p[0]] and 'B' in role_map[p[1]] and 'C' in role_map[p[2]]: return True
         return False
@@ -155,20 +157,14 @@ def can_cover_required_roles(staff_list, role_map):
         return False
 
 def get_possible_day_patterns(available_staff):
-    patterns = []
-    for size in range(4, min(len(available_staff)+1, 10)):
-        for subset in itertools.combinations(available_staff, size): patterns.append(subset)
-    return patterns
+    return [subset for size in range(4, min(len(available_staff)+1, 10)) for subset in itertools.combinations(available_staff, size)]
 
 def assign_roles_smartly(working_indices, role_map):
     assignments = {}
     pool = list(working_indices)
-    
     neko_cands = [s for s in pool if "Neko" in role_map[s]]
     p_neko = [s for s in neko_cands if "A" not in role_map[s] and "B" not in role_map[s]]
-    neko_fixed = None
-    if p_neko: neko_fixed = p_neko[0]
-    elif neko_cands: neko_fixed = neko_cands[0]
+    neko_fixed = p_neko[0] if p_neko else (neko_cands[0] if neko_cands else None)
     
     found_strict = False
     if neko_fixed is not None:
@@ -177,10 +173,8 @@ def assign_roles_smartly(working_indices, role_map):
             if 'A' in role_map[p[0]] and 'B' in role_map[p[1]] and 'C' in role_map[p[2]]:
                 assignments[neko_fixed] = 'ネコ'; assignments[p[0]] = 'A'; assignments[p[1]] = 'B'; assignments[p[2]] = 'C'
                 found_strict = True
-                unassigned = [x for x in rem if x not in p]
-                for ex in unassigned:
-                    has_day_role = any(r in role_map[ex] for r in ["A","B","C","Neko"])
-                    if not has_day_role and "Night" in role_map[ex]: assignments[ex] = '〇'
+                for ex in [x for x in rem if x not in p]:
+                    if not any(r in role_map[ex] for r in ["A","B","C","Neko"]) and "Night" in role_map[ex]: assignments[ex] = '〇'
                     else:
                         caps = role_map[ex]
                         if 'C' in caps: assignments[ex] = 'C'
@@ -194,29 +188,24 @@ def assign_roles_smartly(working_indices, role_map):
             if 'Neko' in role_map[p[0]] and 'A' in role_map[p[1]] and 'B' in role_map[p[2]] and 'C' in role_map[p[3]]:
                 assignments[p[0]] = 'ネコ'; assignments[p[1]] = 'A'; assignments[p[2]] = 'B'; assignments[p[3]] = 'C'
                 found_strict = True
-                unassigned = [x for x in pool if x not in p]
-                for ex in unassigned:
-                    has_day_role = any(r in role_map[ex] for r in ["A","B","C","Neko"])
-                    if not has_day_role and "Night" in role_map[ex]: assignments[ex] = '〇'
+                for ex in [x for x in pool if x not in p]:
+                    if not any(r in role_map[ex] for r in ["A","B","C","Neko"]) and "Night" in role_map[ex]: assignments[ex] = '〇'
                     else:
                         caps = role_map[ex]
                         if 'C' in caps: assignments[ex] = 'C'
                         elif 'B' in caps: assignments[ex] = 'B'
                         elif 'A' in caps: assignments[ex] = 'A'
                 break
+    
     if not found_strict:
         unassigned = set(pool)
-        for s in pool:
-            if s in unassigned and 'A' in role_map[s]: assignments[s] = 'A'; unassigned.remove(s); break
-        for s in pool:
-            if s in unassigned and 'B' in role_map[s]: assignments[s] = 'B'; unassigned.remove(s); break
-        if neko_fixed and neko_fixed in unassigned: assignments[neko_fixed] = 'ネコ'; unassigned.remove(neko_fixed)
-        else:
+        for r in ['A', 'B', 'Neko', 'C']:
             for s in list(unassigned):
-                if 'Neko' in role_map[s]: assignments[s] = 'ネコ'; unassigned.remove(s); break
+                if r == 'Neko' and neko_fixed and neko_fixed in unassigned: assignments[neko_fixed] = 'ネコ'; unassigned.remove(neko_fixed); break
+                if r in role_map[s]: assignments[s] = r; unassigned.remove(s); break
         for s in list(unassigned):
-            if "Night" in role_map[s] and not any(r in role_map[s] for r in ["A","B","C","Neko"]): assignments[s] = '〇'; unassigned.discard(s)
-            elif 'C' in role_map[s]: assignments[s] = 'C'; unassigned.discard(s)
+            if "Night" in role_map[s] and not any(r in role_map[s] for r in ["A","B","C","Neko"]): assignments[s] = '〇'
+            elif 'C' in role_map[s]: assignments[s] = 'C'
     return assignments
 
 def solve_schedule_from_ui(staff_df, holidays_df, days_list):
@@ -227,22 +216,18 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     num_staff = len(staff_df)
     if num_staff == 0: return None
     role_map = get_role_map_from_df(staff_df)
-    try:
-        col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
-        initial_cons = pd.to_numeric(staff_df[col_prev_cons], errors='coerce').fillna(0).astype(int).values
-        req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
-        max_cons_limits = pd.to_numeric(staff_df['最大連勤'], errors='coerce').fillna(4).astype(int).values
-    except: return None 
+    
+    col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
+    initial_cons = pd.to_numeric(staff_df[col_prev_cons], errors='coerce').fillna(0).astype(int).values
+    req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
+    max_cons_limits = pd.to_numeric(staff_df['最大連勤'], errors='coerce').fillna(4).astype(int).values
     
     fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
-    
     for d_idx in range(num_days):
         col_name = f"Day_{d_idx+1}"
         if col_name in holidays_df.columns:
-            col_data = holidays_df[col_name].values
-            for s_idx in range(num_staff):
-                if s_idx < len(col_data): 
-                    if col_data[s_idx] == True or col_data[s_idx] == '×': fixed_shifts[s_idx, d_idx] = '×'
+            for s_idx in range(min(num_staff, len(holidays_df[col_name]))):
+                if holidays_df[col_name].values[s_idx] in [True, '×']: fixed_shifts[s_idx, d_idx] = '×'
                     
     day_patterns = []
     for d in range(num_days):
@@ -259,12 +244,15 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map)]
         invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map)]
         use_patterns = valid_pats[:200] + invalid_pats[:50]
+        
         for path in current_paths:
             for pat in use_patterns:
-                new_cons = path['cons'].copy(); new_offs = path['offs'].copy(); new_off_cons = path['off_cons'].copy(); penalty = 0; violation = False
+                new_cons, new_offs, new_off_cons = path['cons'].copy(), path['offs'].copy(), path['off_cons'].copy()
+                penalty, violation = 0, False
                 if not can_cover_required_roles(pat, role_map): penalty += 50000
                 work_mask = np.zeros(num_staff, dtype=int)
                 for s in pat: work_mask[s] = 1
+                
                 for s in range(num_staff):
                     limit = max_cons_limits[s]
                     if work_mask[s] == 1:
@@ -280,73 +268,111 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                             if "Neko" in role_map[s] and "C" in role_map[s] and "A" not in role_map[s]: penalty += 200
                 if violation: continue
                 days_left = num_days - 1 - d
-                if np.any(new_offs > req_offs): violation = True
-                if np.any(new_offs + days_left < req_offs): violation = True
-                if violation: continue
+                if np.any(new_offs > req_offs) or np.any(new_offs + days_left < req_offs): continue
                 expected = req_offs * ((d+1)/num_days)
                 penalty += np.sum(np.abs(new_offs - expected)) * 10
                 new_sched = path['sched'].copy(); new_sched[:, d] = work_mask
                 next_paths.append({'sched': new_sched, 'cons': new_cons, 'offs': new_offs, 'off_cons': new_off_cons, 'score': path['score'] + penalty})
+        
         next_paths.sort(key=lambda x: x['score'])
         if not next_paths: return None
         current_paths = next_paths[:BEAM_WIDTH]
+        
     best_path = current_paths[0]; final_sched = best_path['sched']
     
-    # --- ヘッダー作成（MultiIndex） ---
+    # --- 完成シフト表の構築（名前はインデックスとして管理） ---
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    top_level = ["名前"] + [str(d.day) for d in days_list]
-    
-    bottom_level = [""]
-    for d in days_list:
-        if is_holiday(d): bottom_level.append("祝")
-        else: bottom_level.append(weekdays_jp[d.weekday()])
-        
+    top_level = [str(d.day) for d in days_list]
+    bottom_level = ["祝" if is_holiday(d) else weekdays_jp[d.weekday()] for d in days_list]
     multi_cols = pd.MultiIndex.from_arrays([top_level, bottom_level])
     
-    output_data = np.full((num_staff + 1, num_days + 1), "", dtype=object)
-    insufficient_row_idx = num_staff
-    
-    names_list = list(staff_df['名前'])
-    for s in range(num_staff): output_data[s, 0] = names_list[s]
-    output_data[insufficient_row_idx, 0] = "不足"
+    output_data = np.full((num_staff + 1, num_days), "", dtype=object)
     
     for d in range(num_days):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
         roles = assign_roles_smartly(working, role_map)
-        is_insufficient = False
-        if not can_cover_required_roles(working, role_map): is_insufficient = True
+        is_insufficient = not can_cover_required_roles(working, role_map)
+        
         for s in range(num_staff):
             if s in working:
-                if s in roles: output_data[s, d+1] = roles[s]
+                if s in roles: output_data[s, d] = roles[s]
                 else:
                     caps = role_map[s]
-                    if 'C' in caps: output_data[s, d+1] = 'C'
-                    elif 'B' in caps: output_data[s, d+1] = 'B'
-                    elif 'A' in caps: output_data[s, d+1] = 'A'
-                    else: output_data[s, d+1] = 'C'
-            else: output_data[s, d+1] = '×' if fixed_shifts[s, d] == '×' else '／'
-        if is_insufficient: output_data[insufficient_row_idx, d+1] = "※"
+                    output_data[s, d] = 'C' if 'C' in caps else ('B' if 'B' in caps else ('A' if 'A' in caps else 'C'))
+            else: output_data[s, d] = '×' if fixed_shifts[s, d] == '×' else '／'
+        if is_insufficient: output_data[num_staff, d] = "※"
         
-    return pd.DataFrame(output_data, columns=multi_cols)
+    index_names = list(staff_df['名前']) + ["不足"]
+    return pd.DataFrame(output_data, columns=multi_cols, index=index_names)
 
-def highlight_cells(val):
-    if val == '／': return 'background-color: #ffcccc; color: black'
-    elif val == '×': return 'background-color: #d9d9d9; color: gray'
-    elif val == '※': return 'background-color: #ff0000; color: white; font-weight: bold'
-    elif val == 'A': return 'background-color: #ccffff; color: black'
-    elif val == 'B': return 'background-color: #ccffcc; color: black'
-    elif val == 'C': return 'background-color: #ffffcc; color: black'
-    elif val == 'ネコ': return 'background-color: #ffe5cc; color: black'
-    elif val == '〇': return 'background-color: #e6e6fa; color: black'
-    return ''
+# --- カスタムCSV出力ジェネレーター ---
+# 画像のフォーマットに完全一致するCSV文字列を生成します
+def generate_custom_csv(result_df, staff_df, days_list):
+    weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    
+    # 1行目：本店、2月、3月...
+    row1 = ["", "本店"]
+    current_m = days_list[0].month
+    count = 0
+    for d in days_list:
+        if d.month == current_m:
+            row1.append(f"　{current_m}月 " if count == 0 else "")
+            count += 1
+        else:
+            current_m = d.month
+            count = 1
+            row1.append(f"　{current_m}月 ")
+    row1.append("") # 休み日数用スペース
+    
+    # 2行目：日にち、26, 27...
+    row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["休み日数"]
+    
+    # 3行目：先月連勤、曜日、木, 金...
+    row3 = ["\"先月からの\n連勤日数\"", "曜日"]
+    for d in days_list:
+        row3.append("祝" if is_holiday(d) else weekdays_jp[d.weekday()])
+    row3.append("")
+    
+    # データ行
+    data_rows = []
+    col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
+    prev_cons_map = {row['名前']: row[col_prev_cons] for _, row in staff_df.iterrows()}
+    
+    for name, row in result_df.iterrows():
+        if name == "不足": continue
+        p_cons = prev_cons_map.get(name, 0)
+        shifts = row.values
+        off_count = sum(1 for x in shifts if x in ['／', '×'])
+        data_rows.append([str(p_cons), name] + list(shifts) + [str(off_count)])
+        
+    lines = [",".join(row1), ",".join(row2), ",".join(row3)]
+    for dr in data_rows: lines.append(",".join([str(x) for x in dr]))
+    return "\n".join(lines).encode('utf-8-sig')
 
-def style_header(idx):
-    return [
-        "background-color: #cce5ff; color: #000;" if v == "土"
-        else "background-color: #ffcccc; color: #000;" if v in ["日", "祝"]
-        else ""
-        for v in idx
-    ]
+# --- 新しいカラーリングロジック（列全体＋セル個別） ---
+def highlight_cells(data):
+    styles = pd.DataFrame('', index=data.index, columns=data.columns)
+    
+    # 1. まずは列全体（縦一列）の背景色を設定
+    for col in data.columns:
+        week_str = col[1]
+        if week_str == '土': styles[col] = 'background-color: #e6f7ff;' # 薄い青
+        elif week_str in ['日', '祝']: styles[col] = 'background-color: #ffe6e6;' # 薄い赤
+            
+    # 2. セル個別のデータに応じて色を上書き
+    for r in data.index:
+        for c in data.columns:
+            val = data.at[r, c]
+            if val == '／': styles.at[r, c] = 'background-color: #ffcccc; color: black;'
+            elif val == '×': styles.at[r, c] = 'background-color: #d9d9d9; color: gray;'
+            elif val == '※': styles.at[r, c] = 'background-color: #ff0000; color: white; font-weight: bold;'
+            elif val == 'A': styles.at[r, c] = 'background-color: #ccffff; color: black;'
+            elif val == 'B': styles.at[r, c] = 'background-color: #ccffcc; color: black;'
+            elif val == 'C': styles.at[r, c] = 'background-color: #ffffcc; color: black;'
+            elif val == 'ネコ': styles.at[r, c] = 'background-color: #ffe5cc; color: black;'
+            elif val == '〇': styles.at[r, c] = 'background-color: #e6e6fa; color: black;'
+            
+    return styles
 
 # ==========================================
 # UI実装
@@ -372,34 +398,16 @@ with st.sidebar:
     if save_clicked:
         clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
         clean_staff_df = clean_staff_df[clean_staff_df['名前'] != '']
-        save_data = {
-            "staff": clean_staff_df.to_dict(),
-            "holidays": st.session_state.holidays_df.to_dict(),
-            "date_range": {
-                "start": start_input.strftime("%Y-%m-%d"),
-                "end": end_input.strftime("%Y-%m-%d")
-            }
-        }
         try:
             with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, ensure_ascii=False, indent=2)
+                json.dump({"staff": clean_staff_df.to_dict(), "holidays": st.session_state.holidays_df.to_dict(), "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")}}, f, ensure_ascii=False, indent=2)
             st.success("保存しました！")
-        except Exception as e:
-            st.error(f"保存失敗: {e}")
+        except Exception as e: st.error(f"保存失敗: {e}")
 
     st.markdown("---")
     st.subheader("📥 バックアップ")
     clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
-    clean_staff_df = clean_staff_df[clean_staff_df['名前'] != '']
-    current_data = {
-        "staff": clean_staff_df.to_dict(),
-        "holidays": st.session_state.holidays_df.to_dict(),
-        "date_range": {
-            "start": start_input.strftime("%Y-%m-%d"),
-            "end": end_input.strftime("%Y-%m-%d")
-        }
-    }
-    json_str = json.dumps(current_data, ensure_ascii=False)
+    json_str = json.dumps({"staff": clean_staff_df.to_dict(), "holidays": st.session_state.holidays_df.to_dict(), "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")}}, ensure_ascii=False)
     st.download_button("設定ファイルDL", json_str, "shift_settings.json", "application/json")
     
     uploaded_json = st.file_uploader("設定ファイル読込", type=["json"])
@@ -408,12 +416,8 @@ with st.sidebar:
             loaded_data = json.load(uploaded_json)
             df_new = pd.DataFrame(loaded_data["staff"])
             for col in ["朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
-                if col not in df_new.columns:
-                    if col == "最大連勤": df_new[col] = 4
-                    else: df_new[col] = False
-            if "先月からの連勤" in df_new.columns:
-                df_new["前月末の連勤数"] = df_new["先月からの連勤"]
-            
+                if col not in df_new.columns: df_new[col] = 4 if col == "最大連勤" else False
+            if "先月からの連勤" in df_new.columns: df_new["前月末の連勤数"] = df_new["先月からの連勤"]
             st.session_state.staff_df = df_new
             st.session_state.holidays_df = pd.DataFrame(loaded_data["holidays"])
             if "date_range" in loaded_data:
@@ -421,20 +425,15 @@ with st.sidebar:
                 st.session_state.loaded_end_date = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
                 st.rerun()
             st.success("読み込み完了")
-        except:
-            st.error("読込エラー")
+        except: st.error("読込エラー")
 
 # --- メインエリア ---
 with st.form("settings_form"):
     st.markdown("### 1️⃣ スタッフ設定")
-    st.info("💡 設定変更後、下の **「✅ 設定を反映して保存」** ボタンを押してください。")
+    st.info("💡 変更後、下の **「✅ 設定を反映して保存」** ボタンを押してください。")
     
     edited_staff_df = st.data_editor(
-        st.session_state.staff_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="staff_editor",
+        st.session_state.staff_df, num_rows="dynamic", use_container_width=True, hide_index=True, key="staff_editor",
         column_config={
             "朝可": st.column_config.CheckboxColumn("朝", width="small", default=True),
             "夜可": st.column_config.CheckboxColumn("夜", width="small", default=False),
@@ -451,10 +450,9 @@ with st.form("settings_form"):
     
     st.markdown("### 2️⃣ 希望休入力")
     holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
-    temp_holidays = st.session_state.holidays_df.copy()
-    display_holidays_df = temp_holidays.reindex(columns=holiday_cols, fill_value=False)
+    display_holidays_df = st.session_state.holidays_df.copy().reindex(columns=holiday_cols, fill_value=False)
     
-    # JSONエラーを回避するため、UI表示用の列名は「改行入り文字列」にして2段に見せる
+    # 【改行トリック】でUI上だけ2段に見せる
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     ui_cols = ["名前"]
     for d in days_list:
@@ -462,44 +460,26 @@ with st.form("settings_form"):
         ui_cols.append(f"{d.day}\n{week_str}")
     
     if len(display_holidays_df) == len(st.session_state.staff_df):
-        valid_names = st.session_state.staff_df['名前'].values
-        display_holidays_df.insert(0, "名前", valid_names)
+        display_holidays_df.insert(0, "名前", st.session_state.staff_df['名前'].values)
     else:
         display_holidays_df.insert(0, "名前", [""] * len(display_holidays_df))
         
     display_holidays_df.columns = ui_cols
+    col_config_holidays = {"名前": st.column_config.TextColumn("名前", disabled=True, width="medium")}
+    for i in range(len(days_list)): col_config_holidays[ui_cols[i+1]] = st.column_config.CheckboxColumn(width="small", default=False)
 
-    col_config_holidays = {
-        "名前": st.column_config.TextColumn("名前", disabled=True, width="medium")
-    }
-    for i, d in enumerate(days_list):
-        col_name = ui_cols[i+1]
-        col_config_holidays[col_name] = st.column_config.CheckboxColumn(width="small", default=False)
-
-    edited_holidays_grid = st.data_editor(
-        display_holidays_df,
-        use_container_width=True,
-        hide_index=True, 
-        key="holidays_editor",
-        column_config=col_config_holidays
-    )
+    edited_holidays_grid = st.data_editor(display_holidays_df, use_container_width=True, hide_index=True, key="holidays_editor", column_config=col_config_holidays)
     submit_btn = st.form_submit_button("✅ 設定を反映して保存", type="primary")
 
 if submit_btn:
     st.session_state.staff_df = edited_staff_df
     valid_staff_count = len(edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")])
-    
     new_holidays = edited_holidays_grid.drop(columns=["名前"])
     new_holidays.columns = holiday_cols 
-    current_holiday_rows = len(new_holidays)
-    
-    if valid_staff_count > current_holiday_rows:
-        rows_to_add = valid_staff_count - current_holiday_rows
-        new_data = pd.DataFrame(False, index=range(rows_to_add), columns=new_holidays.columns)
-        new_holidays = pd.concat([new_holidays, new_data], ignore_index=True)
-    elif valid_staff_count < current_holiday_rows:
+    if valid_staff_count > len(new_holidays):
+        new_holidays = pd.concat([new_holidays, pd.DataFrame(False, index=range(valid_staff_count - len(new_holidays)), columns=new_holidays.columns)], ignore_index=True)
+    elif valid_staff_count < len(new_holidays):
         new_holidays = new_holidays.iloc[:valid_staff_count]
-        
     st.session_state.holidays_df = new_holidays
     st.success("設定を更新しました！")
     st.rerun()
@@ -511,69 +491,15 @@ if st.button("シフトを作成する"):
             result_df = solve_schedule_from_ui(st.session_state.staff_df, st.session_state.holidays_df, days_list)
             if result_df is not None:
                 st.success("作成完了！")
+                st.subheader(f"{days_list[0].month}月度 シフト表")
                 
-                month_title = f"{days_list[0].month}月度 シフト表"
-                st.subheader(month_title)
+                # --- 美しいネイティブ表示 ＆ 列全体の色付け ---
+                styled_df = result_df.style.apply(highlight_cells, axis=None)
+                st.dataframe(styled_df, use_container_width=True, height=600)
                 
-                # スタイリング適用（Pandasのバージョン差異に対応）
-                try:
-                    styled_df = result_df.style \
-                        .map(highlight_cells) \
-                        .apply_index(style_header, axis=1, level=1)
-                except AttributeError:
-                    styled_df = result_df.style \
-                        .applymap(highlight_cells) \
-                        .apply_index(style_header, axis=1, level=1)
-                
-                html_table = styled_df.to_html(index=False, escape=False)
-                
-                custom_css = """
-                <style>
-                .shift-table-container {
-                    overflow-x: auto;
-                    max-width: 100%;
-                    border: 1px solid #ddd;
-                    border-radius: 5px;
-                    margin-bottom: 20px;
-                }
-                .shift-table-container table {
-                    border-collapse: collapse;
-                    width: max-content;
-                    font-size: 13px;
-                    text-align: center;
-                }
-                .shift-table-container th, .shift-table-container td {
-                    border: 1px solid #ddd;
-                    padding: 6px 4px;
-                    min-width: 32px;
-                }
-                .shift-table-container thead th {
-                    position: sticky;
-                    top: 0;
-                    z-index: 2;
-                    background-color: #f0f2f6; 
-                }
-                .shift-table-container tbody td:first-child {
-                    position: sticky;
-                    left: 0;
-                    background-color: #fff;
-                    z-index: 3;
-                    font-weight: bold;
-                    min-width: 100px;
-                }
-                .shift-table-container thead th:first-child {
-                    position: sticky;
-                    left: 0;
-                    z-index: 4;
-                    background-color: #f0f2f6;
-                }
-                </style>
-                """
-                
-                st.markdown(f"{custom_css}<div class='shift-table-container'>{html_table}</div>", unsafe_allow_html=True)
-                
-                csv = result_df.to_csv(index=False).encode('utf-8-sig') 
-                st.download_button("CSVダウンロード", csv, "shift_result.csv", "text/csv")
+                # --- 神エクセルCSV出力 ---
+                csv_data = generate_custom_csv(result_df, st.session_state.staff_df, days_list)
+                st.download_button("📥 CSVダウンロード (エクセル完全対応版)", csv_data, "shift_result.csv", "text/csv")
             else:
                 st.error("条件を満たすシフトが見つかりませんでした。条件を緩和してください。")
         except Exception as e:

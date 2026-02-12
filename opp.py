@@ -10,7 +10,7 @@ import os
 # --- ページ設定 ---
 st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
 
-# --- CSS設定（ヘッダー改行と幅詰め、名前列のスリム化） ---
+# --- CSS設定 ---
 st.markdown("""
 <style>
     .stDataFrame { width: 100% !important; }
@@ -28,11 +28,8 @@ st.markdown("""
         white-space: pre-wrap !important;
         display: inline-block !important;
     }
-    /* 名前の列をスリムに固定 */
-    th[aria-label="名前"], td[aria-label="名前"] {
-        max-width: 100px !important; min-width: 100px !important;
-    }
-    /* その他の設定列の幅固定 */
+    /* 列幅固定 */
+    th[aria-label="名前"], td[aria-label="名前"] { max-width: 100px !important; min-width: 100px !important; }
     th[aria-label="社員"], td[aria-label="社員"],
     th[aria-label="朝"], td[aria-label="朝"],
     th[aria-label="夜"], td[aria-label="夜"],
@@ -66,6 +63,15 @@ def is_holiday(d):
     ]
     return d in holidays_2026
 
+# --- デフォルト設定取得 ---
+def get_default_config():
+    return {
+        "min_night_staff": 3,          # 夜勤の最低人数
+        "enable_seishain_rule": True,  # 正社員の土日出勤ルール
+        "priority_days": ["土", "日"],  # 人員確保を優先する曜日
+        "consecutive_penalty_weight": "通常" # 連勤ペナルティの重み
+    }
+
 # --- データ読み込み・初期化 ---
 def load_settings_from_file():
     if os.path.exists(SETTINGS_FILE):
@@ -73,21 +79,27 @@ def load_settings_from_file():
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
             staff_df = pd.DataFrame(loaded_data["staff"])
+            # 列補完
             for col in ["正社員", "朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
                 if col not in staff_df.columns:
                     if col == "最大連勤": staff_df[col] = 4
                     elif col == "正社員": staff_df[col] = False
                     elif col == "朝可": staff_df[col] = True
                     else: staff_df[col] = False
+            
             start_d, end_d = None, None
             if "date_range" in loaded_data:
                 try:
                     start_d = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
                     end_d = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
                 except: pass
-            return staff_df, pd.DataFrame(loaded_data["holidays"]), start_d, end_d
-        except Exception: return None, None, None, None
-    return None, None, None, None
+            
+            # 設定データの読み込み（なければデフォルト）
+            config = loaded_data.get("config", get_default_config())
+            
+            return staff_df, pd.DataFrame(loaded_data["holidays"]), start_d, end_d, config
+        except Exception: return None, None, None, None, None
+    return None, None, None, None, None
 
 def get_default_date_range():
     today = datetime.date.today()
@@ -114,19 +126,22 @@ def get_default_data():
     holidays_data = pd.DataFrame(False, index=range(7), columns=[f"Day_{i+1}" for i in range(31)])
     return pd.DataFrame(staff_data), holidays_data
 
+# --- セッション初期化 ---
 if 'staff_df' not in st.session_state:
-    loaded_staff, loaded_holidays, l_start, l_end = load_settings_from_file()
+    loaded_staff, loaded_holidays, l_start, l_end, l_config = load_settings_from_file()
     if loaded_staff is not None:
         st.session_state.staff_df = loaded_staff
         st.session_state.holidays_df = loaded_holidays
         st.session_state.loaded_start_date = l_start
         st.session_state.loaded_end_date = l_end
+        st.session_state.config = l_config if l_config else get_default_config()
     else:
         d_staff, d_holidays = get_default_data()
         st.session_state.staff_df = d_staff
         st.session_state.holidays_df = d_holidays
         st.session_state.loaded_start_date = None
         st.session_state.loaded_end_date = None
+        st.session_state.config = get_default_config()
 
 # --- ロジック関数 ---
 def get_role_map_from_df(staff_df):
@@ -142,9 +157,12 @@ def get_role_map_from_df(staff_df):
         role_map[i] = roles
     return role_map
 
-def can_cover_required_roles(staff_list, role_map):
-    if sum(1 for s in staff_list if "Night" in role_map[s]) < 3: return False
+# 必要人数チェック（可変対応）
+def can_cover_required_roles(staff_list, role_map, min_night_count=3):
+    # 夜勤人数チェック
+    if sum(1 for s in staff_list if "Night" in role_map[s]) < min_night_count: return False
     
+    # ネコ部屋・ABC構成チェック
     neko_cands = [s for s in staff_list if "Neko" in role_map[s]]
     p_neko = [s for s in neko_cands if "A" not in role_map[s] and "B" not in role_map[s]]
     neko_fixed = p_neko[0] if p_neko else (neko_cands[0] if neko_cands else None)
@@ -183,11 +201,13 @@ def assign_roles_smartly(working_indices, role_map):
                     if not any(r in role_map[ex] for r in ["A","B","C","Neko"]) and "Night" in role_map[ex]: assignments[ex] = '〇'
                     else:
                         caps = role_map[ex]
-                        if 'C' in caps: assignments[ex] = 'C'
-                        elif 'B' in caps: assignments[ex] = 'B'
-                        elif 'A' in caps: assignments[ex] = 'A'
-                        elif 'Neko' in caps: assignments[ex] = 'ネコ'
-                        elif "Night" in role_map[ex]: assignments[ex] = '〇'
+                        output_role = 'C'
+                        if 'C' in caps: output_role = 'C'
+                        elif 'B' in caps: output_role = 'B'
+                        elif 'A' in caps: output_role = 'A'
+                        elif 'Neko' in caps: output_role = 'ネコ'
+                        if "Night" in role_map[ex] and not any(r in role_map[ex] for r in ["A","B","C","Neko"]): output_role = '〇'
+                        assignments[ex] = output_role
                 break
     else:
         for p in itertools.permutations(pool, 4):
@@ -198,9 +218,11 @@ def assign_roles_smartly(working_indices, role_map):
                     if not any(r in role_map[ex] for r in ["A","B","C","Neko"]) and "Night" in role_map[ex]: assignments[ex] = '〇'
                     else:
                         caps = role_map[ex]
-                        if 'C' in caps: assignments[ex] = 'C'
-                        elif 'B' in caps: assignments[ex] = 'B'
-                        elif 'A' in caps: assignments[ex] = 'A'
+                        output_role = 'C'
+                        if 'C' in caps: output_role = 'C'
+                        elif 'B' in caps: output_role = 'B'
+                        elif 'A' in caps: output_role = 'A'
+                        assignments[ex] = output_role
                 break
     
     if not found_strict:
@@ -214,7 +236,8 @@ def assign_roles_smartly(working_indices, role_map):
             elif 'C' in role_map[s]: assignments[s] = 'C'
     return assignments
 
-def solve_schedule_from_ui(staff_df, holidays_df, days_list):
+# --- メインロジック ---
+def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
     staff_df = staff_df.dropna(subset=['名前'])
     staff_df = staff_df[staff_df['名前'] != '']
     staff_df = staff_df.reset_index(drop=True)
@@ -223,11 +246,19 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     if num_staff == 0: return None
     role_map = get_role_map_from_df(staff_df)
     
+    # 設定値の展開
+    min_night = config.get("min_night_staff", 3)
+    enable_seishain_rule = config.get("enable_seishain_rule", True)
+    priority_days = config.get("priority_days", [])
+    penalty_weight = config.get("consecutive_penalty_weight", "通常")
+    
+    # 連勤ペナルティ係数
+    cons_penalty_factor = 2000 if penalty_weight == "厳格" else (1000 if penalty_weight == "通常" else 500)
+    
     col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
     initial_cons = pd.to_numeric(staff_df[col_prev_cons], errors='coerce').fillna(0).astype(int).values
     req_offs = pd.to_numeric(staff_df['公休数'], errors='coerce').fillna(0).astype(int).values
     max_cons_limits = pd.to_numeric(staff_df['最大連勤'], errors='coerce').fillna(4).astype(int).values
-    
     is_seishain = staff_df['正社員'].astype(bool).values
     
     fixed_shifts = np.full((num_staff, num_days), '', dtype=object)
@@ -254,12 +285,22 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     }]
     
     BEAM_WIDTH = 200
+    weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    
     for d in range(num_days):
-        is_weekend = days_list[d].weekday() >= 5 
+        day_obj = days_list[d]
+        is_weekend = day_obj.weekday() >= 5
+        day_str = weekdays_jp[day_obj.weekday()]
+        
+        # 優先曜日かどうか
+        is_priority_day = day_str in priority_days
+        
         next_paths = []
         patterns = day_patterns[d]
-        valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map)]
-        invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map)]
+        
+        # パターンフィルタリング（設定された最低人数を使う）
+        valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map, min_night)]
+        invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map, min_night)]
         use_patterns = valid_pats[:200] + invalid_pats[:50]
         
         for path in current_paths:
@@ -270,7 +311,17 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                 new_weekend_offs = path['weekend_offs'].copy()
                 
                 penalty, violation = 0, False
-                if not can_cover_required_roles(pat, role_map): penalty += 50000
+                
+                # 要件不足ペナルティ
+                if not can_cover_required_roles(pat, role_map, min_night):
+                    penalty += 50000
+                
+                # 優先曜日の場合、人数が少ないと追加ペナルティ
+                # (例: 最低人数ギリギリよりも、+1人余裕がある方を好むように誘導)
+                staff_count = len(pat)
+                if is_priority_day and staff_count <= 4: # 4人は最低ラインに近いと仮定
+                    penalty += 300 
+
                 work_mask = np.zeros(num_staff, dtype=int)
                 for s in pat: work_mask[s] = 1
                 
@@ -279,14 +330,18 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
                     if work_mask[s] == 1:
                         new_cons[s] += 1; new_off_cons[s] = 0
                         if new_cons[s] > limit:
-                            if new_cons[s] == limit + 1: penalty += 1000
+                            if new_cons[s] == limit + 1: penalty += cons_penalty_factor
                             else: violation = True; break
                         elif new_cons[s] == limit: penalty += 50
                     else:
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
-                        if is_weekend and is_seishain[s]:
+                        
+                        # 正社員土日休みルール（ONの場合のみ）
+                        if enable_seishain_rule and is_weekend and is_seishain[s]:
                             new_weekend_offs[s] += 1
-                            if new_weekend_offs[s] > 1: penalty += 500 
+                            if new_weekend_offs[s] > 1:
+                                penalty += 500
+                        
                         if new_off_cons[s] >= 3:
                             penalty += 100
                             if "Neko" in role_map[s] and "C" in role_map[s] and "A" not in role_map[s]: penalty += 200
@@ -309,19 +364,16 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         
     best_path = current_paths[0]; final_sched = best_path['sched']
     
-    # --- 完成シフト表の構築（列追加） ---
-    weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    # --- 完成シフト表構築 ---
     top_level = [str(d.day) for d in days_list] + ["勤(休)"]
     bottom_level = ["祝" if is_holiday(d) else weekdays_jp[d.weekday()] for d in days_list] + [""]
     multi_cols = pd.MultiIndex.from_arrays([top_level, bottom_level])
-    
     output_data = np.full((num_staff + 1, num_days + 1), "", dtype=object)
     
     for d in range(num_days):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
         roles = assign_roles_smartly(working, role_map)
-        is_insufficient = not can_cover_required_roles(working, role_map)
-        
+        is_insufficient = not can_cover_required_roles(working, role_map, min_night)
         for s in range(num_staff):
             if s in working:
                 if s in roles: output_data[s, d] = roles[s]
@@ -331,7 +383,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
             else: output_data[s, d] = '×' if fixed_shifts[s, d] == '×' else '／'
         if is_insufficient: output_data[num_staff, d] = "※"
     
-    # --- 「勤(休)」列の計算 ---
     for s in range(num_staff):
         shifts = output_data[s, :num_days]
         off_count = sum(1 for x in shifts if x in ['／', '×'])
@@ -342,10 +393,9 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     index_names = list(staff_df['名前']) + ["不足"]
     return pd.DataFrame(output_data, columns=multi_cols, index=index_names)
 
-# --- カスタムCSV出力ジェネレーター ---
+# --- CSV生成 ---
 def generate_custom_csv(result_df, staff_df, days_list):
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    
     row1 = ["", "本店"]
     current_m = days_list[0].month
     count = 0
@@ -358,43 +408,35 @@ def generate_custom_csv(result_df, staff_df, days_list):
             count = 1
             row1.append(f"　{current_m}月 ")
     row1.append("")
-    
     row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["勤(休)"]
-    
     row3 = ["\"先月からの\n連勤日数\"", "曜日"]
     for d in days_list:
         row3.append("祝" if is_holiday(d) else weekdays_jp[d.weekday()])
     row3.append("")
-    
     data_rows = []
     col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
     prev_cons_map = {row['名前']: row[col_prev_cons] for _, row in staff_df.iterrows()}
-    
     for name, row in result_df.iterrows():
         if name == "不足": continue
         p_cons = prev_cons_map.get(name, 0)
         data_rows.append([str(p_cons), name] + list(row.values))
-        
     lines = [",".join(row1), ",".join(row2), ",".join(row3)]
     for dr in data_rows: lines.append(",".join([str(x) for x in dr]))
     return "\n".join(lines).encode('utf-8-sig')
 
-# --- カラーリングロジック ---
+# --- スタイル設定 ---
 def highlight_cells(data):
     styles = pd.DataFrame('', index=data.index, columns=data.columns)
-    
     for col in data.columns:
         week_str = col[1]
         if week_str == '土': styles[col] = 'background-color: #e6f7ff;'
         elif week_str in ['日', '祝']: styles[col] = 'background-color: #ffe6e6;'
-            
     for r in data.index:
         for c in data.columns:
             val = data.at[r, c]
             if c[0] == '勤(休)':
                 styles.at[r, c] += 'font-weight: bold; background-color: #f9f9f9;'
                 continue
-            
             if val == '／': styles.at[r, c] += 'background-color: #ffcccc; color: black;'
             elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
             elif val == '※': styles.at[r, c] += 'background-color: #ff0000; color: white; font-weight: bold;'
@@ -403,7 +445,6 @@ def highlight_cells(data):
             elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
             elif val == 'ネコ': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
             elif val == '〇': styles.at[r, c] += 'background-color: #e6e6fa; color: black;'
-            
     return styles
 
 # ==========================================
@@ -430,16 +471,27 @@ with st.sidebar:
     if save_clicked:
         clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
         clean_staff_df = clean_staff_df[clean_staff_df['名前'] != '']
+        save_dict = {
+            "staff": clean_staff_df.to_dict(),
+            "holidays": st.session_state.holidays_df.to_dict(),
+            "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")},
+            "config": st.session_state.config # 設定も保存
+        }
         try:
             with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-                json.dump({"staff": clean_staff_df.to_dict(), "holidays": st.session_state.holidays_df.to_dict(), "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")}}, f, ensure_ascii=False, indent=2)
+                json.dump(save_dict, f, ensure_ascii=False, indent=2)
             st.success("保存しました！")
         except Exception as e: st.error(f"保存失敗: {e}")
 
     st.markdown("---")
     st.subheader("📥 バックアップ")
     clean_staff_df = st.session_state.staff_df.dropna(subset=['名前'])
-    json_str = json.dumps({"staff": clean_staff_df.to_dict(), "holidays": st.session_state.holidays_df.to_dict(), "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")}}, ensure_ascii=False)
+    json_str = json.dumps({
+        "staff": clean_staff_df.to_dict(),
+        "holidays": st.session_state.holidays_df.to_dict(),
+        "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")},
+        "config": st.session_state.config
+    }, ensure_ascii=False)
     st.download_button("設定ファイルDL", json_str, "shift_settings.json", "application/json")
     
     uploaded_json = st.file_uploader("設定ファイル読込", type=["json"])
@@ -459,12 +511,38 @@ with st.sidebar:
             if "date_range" in loaded_data:
                 st.session_state.loaded_start_date = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
                 st.session_state.loaded_end_date = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
-                st.rerun()
+            if "config" in loaded_data:
+                st.session_state.config = loaded_data["config"]
+            st.rerun()
             st.success("読み込み完了")
         except: st.error("読込エラー")
 
 # --- メインエリア ---
 with st.form("settings_form"):
+    # === 基本設定セクション (New!) ===
+    with st.expander("🛠 基本設定（クリックで開閉）", expanded=False):
+        c_conf1, c_conf2 = st.columns(2)
+        with c_conf1:
+            st.markdown("##### 👥 人数・ルール設定")
+            new_min_night = st.number_input("🌙 夜勤の最低必要人数", min_value=1, max_value=10, value=st.session_state.config.get("min_night_staff", 3))
+            new_seishain_rule = st.checkbox("👔 正社員の土日休み制限（月1回推奨）を有効にする", value=st.session_state.config.get("enable_seishain_rule", True))
+            new_penalty = st.selectbox("⚠️ 最大連勤ペナルティの重さ", ["通常", "厳格", "緩め"], index=["通常", "厳格", "緩め"].index(st.session_state.config.get("consecutive_penalty_weight", "通常")))
+        
+        with c_conf2:
+            st.markdown("##### 🗓 曜日優先度")
+            st.caption("ここで選んだ曜日は、優先的に人員を確保します（不足時のペナルティUP）")
+            weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+            default_priority = st.session_state.config.get("priority_days", ["土", "日"])
+            new_priority_days = st.multiselect("優先確保する曜日", weekdays, default=default_priority)
+        
+        # 設定をセッションステートに一時保存
+        st.session_state.config.update({
+            "min_night_staff": new_min_night,
+            "enable_seishain_rule": new_seishain_rule,
+            "priority_days": new_priority_days,
+            "consecutive_penalty_weight": new_penalty
+        })
+
     st.markdown("### 1️⃣ スタッフ設定")
     st.info("💡 変更後、下の **「✅ 設定を反映して保存」** ボタンを押してください。")
     
@@ -481,7 +559,6 @@ with st.form("settings_form"):
             "前月末の連勤数": st.column_config.NumberColumn("前連勤", width="small"),
             "最大連勤": st.column_config.NumberColumn("MAX連", width="small", default=4),
             "公休数": st.column_config.NumberColumn("公休", width="small"),
-            # 幅をsmallに変更してスリム化
             "名前": st.column_config.TextColumn("名前", width="small"),
         }
     )
@@ -502,7 +579,6 @@ with st.form("settings_form"):
         display_holidays_df.insert(0, "名前", [""] * len(display_holidays_df))
         
     display_holidays_df.columns = ui_cols
-    # こちらの幅もsmallに変更
     col_config_holidays = {"名前": st.column_config.TextColumn("名前", disabled=True, width="small")}
     for i in range(len(days_list)): col_config_holidays[ui_cols[i+1]] = st.column_config.CheckboxColumn(width="small", default=False)
 
@@ -526,7 +602,8 @@ st.markdown("### 3️⃣ シフト作成")
 if st.button("シフトを作成する"):
     with st.spinner("AIがシフトパズルを解いています...🧩"):
         try:
-            result_df = solve_schedule_from_ui(st.session_state.staff_df, st.session_state.holidays_df, days_list)
+            # configも渡す
+            result_df = solve_schedule_from_ui(st.session_state.staff_df, st.session_state.holidays_df, days_list, st.session_state.config)
             if result_df is not None:
                 st.success("作成完了！")
                 st.subheader(f"{days_list[0].month}月度 シフト表")
@@ -537,6 +614,6 @@ if st.button("シフトを作成する"):
                 csv_data = generate_custom_csv(result_df, st.session_state.staff_df, days_list)
                 st.download_button("📥 CSVダウンロード (エクセル完全対応版)", csv_data, "shift_result.csv", "text/csv")
             else:
-                st.error("条件を満たすシフトが見つかりませんでした。条件を緩和してください。")
+                st.error("条件を満たすシフトが見つかりませんでした。基本設定の条件を緩めるか、スタッフの休みを調整してください。")
         except Exception as e:
             st.error(f"エラー: {e}")

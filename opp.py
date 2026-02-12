@@ -10,7 +10,7 @@ import os
 # --- ページ設定 ---
 st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
 
-# --- CSS設定（ヘッダー改行と幅詰め） ---
+# --- CSS設定（ヘッダー改行と幅詰め、名前列のスリム化） ---
 st.markdown("""
 <style>
     .stDataFrame { width: 100% !important; }
@@ -28,6 +28,11 @@ st.markdown("""
         white-space: pre-wrap !important;
         display: inline-block !important;
     }
+    /* 名前の列をスリムに固定 */
+    th[aria-label="名前"], td[aria-label="名前"] {
+        max-width: 100px !important; min-width: 100px !important;
+    }
+    /* その他の設定列の幅固定 */
     th[aria-label="社員"], td[aria-label="社員"],
     th[aria-label="朝"], td[aria-label="朝"],
     th[aria-label="夜"], td[aria-label="夜"],
@@ -94,7 +99,7 @@ def get_default_date_range():
 
 def get_default_data():
     staff_data = {
-        "名前": ["正社員A_1", "正社員A_2", "正社員B_1", "正社員B_2", "パート夜", "パート朝1", "パート朝2"],
+        "名前": ["西原", "松本", "中島", "山下", "下尾", "原", "松尾"],
         "正社員": [True, True, True, True, False, False, False],
         "朝可": [True, True, True, True, False, True, True],
         "夜可": [True, True, True, True, True, False, False], 
@@ -306,12 +311,10 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
     
     # --- 完成シフト表の構築（列追加） ---
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    # ヘッダーに「勤(休)」を追加
     top_level = [str(d.day) for d in days_list] + ["勤(休)"]
     bottom_level = ["祝" if is_holiday(d) else weekdays_jp[d.weekday()] for d in days_list] + [""]
     multi_cols = pd.MultiIndex.from_arrays([top_level, bottom_level])
     
-    # データ格納用（列数を +1 する）
     output_data = np.full((num_staff + 1, num_days + 1), "", dtype=object)
     
     for d in range(num_days):
@@ -334,7 +337,7 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
         off_count = sum(1 for x in shifts if x in ['／', '×'])
         work_count = num_days - off_count
         output_data[s, num_days] = f"{work_count}({off_count})"
-    output_data[num_staff, num_days] = "" # 不足行は空欄
+    output_data[num_staff, num_days] = ""
         
     index_names = list(staff_df['名前']) + ["不足"]
     return pd.DataFrame(output_data, columns=multi_cols, index=index_names)
@@ -343,7 +346,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list):
 def generate_custom_csv(result_df, staff_df, days_list):
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     
-    # 1行目：本店、月表示
     row1 = ["", "本店"]
     current_m = days_list[0].month
     count = 0
@@ -355,18 +357,15 @@ def generate_custom_csv(result_df, staff_df, days_list):
             current_m = d.month
             count = 1
             row1.append(f"　{current_m}月 ")
-    row1.append("") # 勤(休)用の空セル
+    row1.append("")
     
-    # 2行目：日にち
     row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["勤(休)"]
     
-    # 3行目：曜日
     row3 = ["\"先月からの\n連勤日数\"", "曜日"]
     for d in days_list:
         row3.append("祝" if is_holiday(d) else weekdays_jp[d.weekday()])
     row3.append("")
     
-    # データ行
     data_rows = []
     col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
     prev_cons_map = {row['名前']: row[col_prev_cons] for _, row in staff_df.iterrows()}
@@ -374,7 +373,6 @@ def generate_custom_csv(result_df, staff_df, days_list):
     for name, row in result_df.iterrows():
         if name == "不足": continue
         p_cons = prev_cons_map.get(name, 0)
-        # row.values にはシフトに加えて最後に「20(10)」が含まれているのでそのまま結合
         data_rows.append([str(p_cons), name] + list(row.values))
         
     lines = [",".join(row1), ",".join(row2), ",".join(row3)]
@@ -393,7 +391,6 @@ def highlight_cells(data):
     for r in data.index:
         for c in data.columns:
             val = data.at[r, c]
-            # 勤休列のスタイル例外処理
             if c[0] == '勤(休)':
                 styles.at[r, c] += 'font-weight: bold; background-color: #f9f9f9;'
                 continue
@@ -484,7 +481,8 @@ with st.form("settings_form"):
             "前月末の連勤数": st.column_config.NumberColumn("前連勤", width="small"),
             "最大連勤": st.column_config.NumberColumn("MAX連", width="small", default=4),
             "公休数": st.column_config.NumberColumn("公休", width="small"),
-            "名前": st.column_config.TextColumn("名前", width="medium"),
+            # 幅をsmallに変更してスリム化
+            "名前": st.column_config.TextColumn("名前", width="small"),
         }
     )
     
@@ -504,7 +502,8 @@ with st.form("settings_form"):
         display_holidays_df.insert(0, "名前", [""] * len(display_holidays_df))
         
     display_holidays_df.columns = ui_cols
-    col_config_holidays = {"名前": st.column_config.TextColumn("名前", disabled=True, width="medium")}
+    # こちらの幅もsmallに変更
+    col_config_holidays = {"名前": st.column_config.TextColumn("名前", disabled=True, width="small")}
     for i in range(len(days_list)): col_config_holidays[ui_cols[i+1]] = st.column_config.CheckboxColumn(width="small", default=False)
 
     edited_holidays_grid = st.data_editor(display_holidays_df, use_container_width=True, hide_index=True, key="holidays_editor", column_config=col_config_holidays)

@@ -28,7 +28,9 @@ st.markdown("""
         white-space: pre-wrap !important;
         display: inline-block !important;
     }
+    /* 名前列 */
     th[aria-label="名前"], td[aria-label="名前"] { max-width: 100px !important; min-width: 100px !important; }
+    /* 設定列 */
     th[aria-label="社員"], td[aria-label="社員"],
     th[aria-label="朝"], td[aria-label="朝"],
     th[aria-label="夜"], td[aria-label="夜"],
@@ -62,7 +64,7 @@ def is_holiday(d):
     ]
     return d in holidays_2026
 
-# --- デフォルト設定取得 ---
+# --- デフォルト設定 ---
 def get_default_config():
     return {
         "min_night_staff": 3,          
@@ -71,7 +73,7 @@ def get_default_config():
         "consecutive_penalty_weight": "通常" 
     }
 
-# --- データ読み込み・初期化 ---
+# --- データ読み込み ---
 def load_settings_from_file():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -173,12 +175,9 @@ def can_cover_required_roles(staff_list, role_map, min_night_count=3):
              if 'Neko' in role_map[p[0]] and 'A' in role_map[p[1]] and 'B' in role_map[p[2]] and 'C' in role_map[p[3]]: return True
         return False
 
-# ここが重要！人が足りなくても絶対にエラーにしないための処置
 def get_possible_day_patterns(available_staff):
     n = len(available_staff)
-    if n < 4:
-        # 4人未満しかいない日は、出勤できる人全員を出勤させるパターンだけ返す
-        return [tuple(available_staff)]
+    if n < 4: return [tuple(available_staff)] # 人数不足でも全通り返す
     return [subset for size in range(4, min(n+1, 10)) for subset in itertools.combinations(available_staff, size)]
 
 def assign_roles_smartly(working_indices, role_map):
@@ -222,7 +221,6 @@ def assign_roles_smartly(working_indices, role_map):
                         elif 'A' in caps: output_role = 'A'
                         assignments[ex] = output_role
                 break
-    
     if not found_strict:
         unassigned = set(pool)
         for r in ['A', 'B', 'Neko', 'C']:
@@ -234,7 +232,7 @@ def assign_roles_smartly(working_indices, role_map):
             elif 'C' in role_map[s]: assignments[s] = 'C'
     return assignments
 
-# --- メインロジック（絶対諦めない仕様） ---
+# --- メインロジック ---
 def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
     staff_df = staff_df.dropna(subset=['名前'])
     staff_df = staff_df[staff_df['名前'] != '']
@@ -248,7 +246,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
     enable_seishain_rule = config.get("enable_seishain_rule", True)
     priority_days = config.get("priority_days", ["土", "日"])
     penalty_weight = config.get("consecutive_penalty_weight", "通常")
-    
     cons_penalty_factor = 2000 if penalty_weight == "厳格" else (1000 if penalty_weight == "通常" else 500)
     
     col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
@@ -280,7 +277,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
         'score': 0
     }]
     
-    # 探索の幅を広げて、さらに賢く
     BEAM_WIDTH = 300
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
     
@@ -293,6 +289,7 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
         next_paths = []
         patterns = day_patterns[d]
         
+        # フィルタリング
         valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map, min_night)]
         invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map, min_night)]
         use_patterns = valid_pats[:200] + invalid_pats[:50]
@@ -305,10 +302,11 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
                 new_weekend_offs = path['weekend_offs'].copy()
                 penalty = 0
                 
-                # ペナルティ処理（エラーで落とさず、点数を悪くするだけに留める）
+                # 要件不足の場合のペナルティ (以前50000だったが、休日数厳守のため相対的に軽くする)
+                # 休日数違反は 1,000,000 なので、50,000 なら「不足してでも休日を守る」動きになる
                 if not can_cover_required_roles(pat, role_map, min_night):
-                    penalty += 50000
-                    
+                    penalty += 50000 
+                
                 staff_count = len(pat)
                 if is_priority_day and staff_count <= 4: penalty += 30 
 
@@ -321,23 +319,26 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
                         new_cons[s] += 1; new_off_cons[s] = 0
                         if new_cons[s] > limit:
                             if new_cons[s] == limit + 1: penalty += cons_penalty_factor
-                            else: penalty += 100000  # 強制終了させず、超特大ペナルティを与える
+                            else: penalty += 500000 # 連勤オーバーも極力避ける
                         elif new_cons[s] == limit: penalty += 50
                     else:
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
-                        
                         if enable_seishain_rule and is_weekend and is_seishain[s]:
                             new_weekend_offs[s] += 1
                             if new_weekend_offs[s] > 2: penalty += 50
-                            
                         if new_off_cons[s] >= 3:
                             penalty += 100
                             if "Neko" in role_map[s] and "C" in role_map[s] and "A" not in role_map[s]: penalty += 200
                 
                 days_left = num_days - 1 - d
+                
+                # 【最重要】休日数（公休数）の厳守ロジック
+                # 予測される最終休日数が足りなくなる、または多すぎる場合に超巨大ペナルティ
                 for s in range(num_staff):
-                    if new_offs[s] > req_offs[s]: penalty += 100000
-                    if new_offs[s] + days_left < req_offs[s]: penalty += 100000
+                    if new_offs[s] > req_offs[s]: 
+                        penalty += 1000000 # 休みすぎは絶対NG
+                    if new_offs[s] + days_left < req_offs[s]: 
+                        penalty += 1000000 # 休み不足も絶対NG
 
                 expected = req_offs * ((d+1)/num_days)
                 penalty += np.sum(np.abs(new_offs - expected)) * 10
@@ -366,20 +367,35 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
         working = [s for s in range(num_staff) if final_sched[s, d] == 1]
         roles = assign_roles_smartly(working, role_map)
         is_insufficient = not can_cover_required_roles(working, role_map, min_night)
+        
         for s in range(num_staff):
             if s in working:
-                if s in roles: output_data[s, d] = roles[s]
+                role_str = ""
+                if s in roles: role_str = roles[s]
                 else:
                     caps = role_map[s]
-                    output_data[s, d] = 'C' if 'C' in caps else ('B' if 'B' in caps else ('A' if 'A' in caps else 'C'))
-            else: output_data[s, d] = '×' if fixed_shifts[s, d] == '×' else '／'
+                    role_str = 'C' if 'C' in caps else ('B' if 'B' in caps else ('A' if 'A' in caps else 'C'))
+                
+                # 不足日マーク処理 (A(※)のようにする)
+                if is_insufficient:
+                    role_str += "(※)"
+                output_data[s, d] = role_str
+            else: 
+                output_data[s, d] = '×' if fixed_shifts[s, d] == '×' else '／'
+        
         if is_insufficient: output_data[num_staff, d] = "※"
     
     for s in range(num_staff):
         shifts = output_data[s, :num_days]
         off_count = sum(1 for x in shifts if x in ['／', '×'])
         work_count = num_days - off_count
-        output_data[s, num_days] = f"{work_count}({off_count})"
+        
+        # 公休数が守られていない場合、集計にも警告をつける
+        summary_str = f"{work_count}({off_count})"
+        if off_count != req_offs[s]:
+             summary_str += "※"
+        output_data[s, num_days] = summary_str
+        
     output_data[num_staff, num_days] = ""
         
     index_names = list(staff_df['名前']) + ["不足"]
@@ -425,18 +441,32 @@ def highlight_cells(data):
         elif week_str in ['日', '祝']: styles[col] = 'background-color: #ffe6e6;'
     for r in data.index:
         for c in data.columns:
-            val = data.at[r, c]
+            val = str(data.at[r, c]) # 文字列型にキャスト
             if c[0] == '勤(休)':
                 styles.at[r, c] += 'font-weight: bold; background-color: #f9f9f9;'
+                if "※" in val: styles.at[r, c] += 'color: red;' # 集計ズレは赤文字
                 continue
-            if val == '／': styles.at[r, c] += 'background-color: #ffcccc; color: black;'
-            elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
-            elif val == '※': styles.at[r, c] += 'background-color: #ff0000; color: white; font-weight: bold;'
-            elif val == 'A': styles.at[r, c] += 'background-color: #ccffff; color: black;'
-            elif val == 'B': styles.at[r, c] += 'background-color: #ccffcc; color: black;'
-            elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
-            elif val == 'ネコ': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
-            elif val == '〇': styles.at[r, c] += 'background-color: #e6e6fa; color: black;'
+            
+            # 不足マーク付きの役割 (例: A(※)) の色分け
+            base_style = ''
+            if 'A' in val and '※' in val: base_style = 'background-color: #ccffff; color: red; font-weight: bold;'
+            elif 'B' in val and '※' in val: base_style = 'background-color: #ccffcc; color: red; font-weight: bold;'
+            elif 'C' in val and '※' in val: base_style = 'background-color: #ffffcc; color: red; font-weight: bold;'
+            elif 'ネコ' in val and '※' in val: base_style = 'background-color: #ffe5cc; color: red; font-weight: bold;'
+            elif '〇' in val and '※' in val: base_style = 'background-color: #e6e6fa; color: red; font-weight: bold;'
+            
+            # 通常の色分け
+            elif val == '／': base_style = 'background-color: #ffcccc; color: black;'
+            elif val == '×': base_style = 'background-color: #d9d9d9; color: gray;'
+            elif val == '※': base_style = 'background-color: #ff0000; color: white; font-weight: bold;'
+            elif val == 'A': base_style = 'background-color: #ccffff; color: black;'
+            elif val == 'B': base_style = 'background-color: #ccffcc; color: black;'
+            elif val == 'C': base_style = 'background-color: #ffffcc; color: black;'
+            elif val == 'ネコ': base_style = 'background-color: #ffe5cc; color: black;'
+            elif val == '〇': base_style = 'background-color: #e6e6fa; color: black;'
+            
+            styles.at[r, c] += base_style
+            
     return styles
 
 # ==========================================
@@ -596,11 +626,10 @@ if st.button("シフトを作成する"):
             if result is not None:
                 result_df, final_score = result
                 
-                # 新機能：AIからの警告メッセージ
-                if final_score >= 100000:
-                    st.warning("⚠️ 【AIからの報告】希望休の重なりなどで条件が厳しすぎたため、一部スタッフの「公休数」や「最大連勤」のルールを破って無理やり作成しました。表の「勤(休)」の数や連勤状況を確認して、手直ししてください。")
+                if final_score >= 1000000:
+                    st.warning("⚠️ 【AIからの報告】どうしても公休数を守れないスタッフがいました。（希望休の数が公休設定を超えている可能性があります）")
                 elif final_score >= 50000:
-                    st.warning("⚠️ 【AIからの報告】人が足りず、一部の日に必要な役割（ネコ/A/B/C/夜勤）を満たせませんでした。（表の一番下の「不足」行に ※ が付いている日です）")
+                    st.warning("⚠️ 【AIからの報告】人員不足の日がありますが、公休数を守ることを優先しました。不足日には (※) マークが付いています。")
                 else:
                     st.success("✨ 作成完了！すべての条件を綺麗に満たしたシフトができました。")
 
@@ -612,6 +641,6 @@ if st.button("シフトを作成する"):
                 csv_data = generate_custom_csv(result_df, st.session_state.staff_df, days_list)
                 st.download_button("📥 CSVダウンロード (エクセル完全対応版)", csv_data, "shift_result.csv", "text/csv")
             else:
-                st.error("システムエラーで作成できませんでした。設定を見直してください。")
+                st.error("システムエラーで作成できませんでした。")
         except Exception as e:
             st.error(f"エラー: {e}")

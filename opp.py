@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(D枠・Z枠対応版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(ABCD必須版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -57,7 +57,7 @@ def get_default_data():
         "A": [True, True, False, False, False, False, False],
         "B": [False, True, True, True, False, False, False],
         "C": [False, False, True, True, False, True, True],
-        "D": [False, True, True, True, False, True, True], # 旧ネコ
+        "D": [False, True, True, True, False, True, True],
         "前月末の連勤数": [0, 5, 1, 0, 0, 2, 2],
         "最大連勤": [4, 4, 4, 4, 3, 4, 3],
         "公休数": [8, 8, 8, 8, 13, 9, 15]
@@ -127,68 +127,76 @@ if 'staff_df' not in st.session_state:
 
 # --- ロジック ---
 def can_cover_required_roles(staff_list, role_map, level_map, min_night_count):
+    # 既存チェック
     if sum(1 for s in staff_list if "Night" in role_map[s]) < min_night_count: return False
     if sum(1 for s in staff_list if level_map[s] == "リーダー") < 1: return False
-    if len(staff_list) < 4: return False
+    
+    # 【新】ABCD必須チェック
+    # その日のメンバーで、A, B, C, Dの能力を持つ人がそれぞれ少なくとも1人以上いるか確認
+    # (重複可だが、組み合わせとして成立するかどうかは assign_roles_smartly で担保)
+    # ここでは簡易チェックとして「能力者数」を見る
+    has_a = any("A" in role_map[s] for s in staff_list)
+    has_b = any("B" in role_map[s] for s in staff_list)
+    has_c = any("C" in role_map[s] for s in staff_list)
+    has_d = any("D" in role_map[s] for s in staff_list)
+    
+    if not (has_a and has_b and has_c and has_d):
+        return False
+        
     return True
 
 def assign_roles_smartly(working_indices, role_map):
     pool = list(working_indices)
-    target_roles = ["A", "B", "C", "D"]
     best_assignment = {}
-    best_score = -1
+    found_perfect = False
     
-    # 組み合わせ爆発を防ぐため、候補者が多い場合はランダムサンプリングで最適解を探る
-    # (A,B,C,D を埋めるための順列探索)
+    # ABCDを埋めるための組み合わせ探索
+    # 人数が少ないので、poolから4人を選んで順列を作る（A,B,C,D役）
     
-    # 全探索（または十分な回数の試行）で、A>B>C>D の優先順位で埋まるパターンを探す
-    # スコアリング: A埋まった=1000点, B埋まった=100点, C=10点, D=1点
+    # poolの人数が4人未満ならABCD埋まらない（can_coverで弾いているはずだが念のため）
+    if len(pool) >= 4:
+        # ランダムサンプリングで探索 (組み合わせ爆発防止)
+        # poolから4人選ぶ全ての順列を試すと重いので、random.sampleで効率化
+        for _ in range(500): # 試行回数
+            sample = random.sample(pool, 4)
+            # sample[0]=A, [1]=B, [2]=C, [3]=D と仮定
+            if "A" in role_map[sample[0]] and \
+               "B" in role_map[sample[1]] and \
+               "C" in role_map[sample[2]] and \
+               "D" in role_map[sample[3]]:
+                best_assignment[sample[0]] = "A"
+                best_assignment[sample[1]] = "B"
+                best_assignment[sample[2]] = "C"
+                best_assignment[sample[3]] = "D"
+                found_perfect = True
+                break
     
-    # 4人選ぶ組み合わせ（順列）を作成
-    # poolの人数が4人未満の場合はその人数分
-    k = min(len(pool), 4)
+    # 万が一見つからなかった場合（重複などで）は、貪欲法で埋める
+    if not found_perfect:
+        temp_pool = pool.copy()
+        for r in ["A", "B", "C", "D"]:
+            for s in temp_pool:
+                if r in role_map[s]:
+                    best_assignment[s] = r
+                    temp_pool.remove(s)
+                    break
     
-    # 高速化のため、役割を持たない人は除外して順列を作るなどの工夫も可能だが
-    # ここではシンプルにpermutationし、役割適正をチェックする
-    
-    candidates_perms = []
-    if len(pool) <= 8:
-        candidates_perms = list(itertools.permutations(pool, k))
-    else:
-        # 人数が多い場合はランダムにシャッフルして試行
-        for _ in range(2000):
-            candidates_perms.append(random.sample(pool, k))
-            
-    for p in candidates_perms:
-        temp_assign = {}
-        score = 0
-        
-        # p[0] -> A, p[1] -> B, p[2] -> C, p[3] -> D (kによって変動)
-        used_roles = set()
-        
-        if k >= 1 and "A" in role_map[p[0]]: 
-            score += 1000; temp_assign[p[0]] = "A"; used_roles.add("A")
-        if k >= 2 and "B" in role_map[p[1]]: 
-            score += 100; temp_assign[p[1]] = "B"; used_roles.add("B")
-        if k >= 3 and "C" in role_map[p[2]]: 
-            score += 10; temp_assign[p[2]] = "C"; used_roles.add("C")
-        if k >= 4 and "D" in role_map[p[3]]: 
-            score += 1; temp_assign[p[3]] = "D"; used_roles.add("D")
-            
-        if score > best_score:
-            best_score = score
-            best_assignment = temp_assign
-            
-        if score == 1111: # 全て埋まったら終了
-            break
-            
-    # 選ばれなかった人は全員 "Z"
+    # 残りの人員の割り当て (〇 or Z)
     final_assignments = {}
+    
+    # まず確定した役割をセット
+    assigned_members = set(best_assignment.keys())
+    for s, role in best_assignment.items():
+        final_assignments[s] = role
+        
+    # 未割り当ての人
     for s in pool:
-        if s in best_assignment:
-            final_assignments[s] = best_assignment[s]
-        else:
-            final_assignments[s] = "Z"
+        if s not in assigned_members:
+            # 夜勤可能なら「〇」、そうでなければ「Z」
+            if "Night" in role_map[s]:
+                final_assignments[s] = "〇"
+            else:
+                final_assignments[s] = "Z"
             
     return final_assignments
 
@@ -242,8 +250,8 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
         pats = []
         for size in range(4, min(len(base_avail)+1, 10)):
             sample_pool = list(itertools.combinations(base_avail, size))
-            if len(sample_pool) > 250:
-                pats.extend(random.sample(sample_pool, 250))
+            if len(sample_pool) > 300: # 探索数増加
+                pats.extend(random.sample(sample_pool, 300))
             else:
                 pats.extend(sample_pool)
         
@@ -269,9 +277,9 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
             for p in valid_pats_for_path:
                 penalty = 0
                 
-                # 1. 役割要件
+                # 1. 役割要件 (ABCD必須チェック含む)
                 if not can_cover_required_roles(p, role_map, level_map, min_night):
-                    penalty += 50000 
+                    penalty += 500000 # ペナルティ強化
                 
                 # 2. 優先日
                 if is_priority and len(p) <= 4: penalty += 1000
@@ -329,14 +337,23 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
         working = [s for s in range(num_staff) if best['sched'][s, d] == 1]
         roles = assign_roles_smartly(working, role_map)
         
-        if not can_cover_required_roles(working, role_map, level_map, min_night): 
+        # 役割要件チェック (ABCD揃っているか)
+        # assign_roles_smartlyの結果、A,B,C,Dが含まれているか確認
+        assigned_values = set(roles.values())
+        missing_roles = []
+        if "A" not in assigned_values: missing_roles.append("A")
+        if "B" not in assigned_values: missing_roles.append("B")
+        if "C" not in assigned_values: missing_roles.append("C")
+        if "D" not in assigned_values: missing_roles.append("D")
+        
+        if not can_cover_required_roles(working, role_map, level_map, min_night) or missing_roles: 
             res_data[num_staff, d] = "※" 
             eval_score -= 5
             insufficient_days += 1
         
         for s in range(num_staff):
             if s in working: 
-                res_data[s, d] = roles.get(s, "Z") # デフォルトはZ
+                res_data[s, d] = roles.get(s, "Z")
             else: 
                 res_data[s, d] = "／"
 
@@ -384,14 +401,15 @@ def highlight_cells(data):
             elif val == '／': styles.at[r, c] += 'background-color: #ffdddd; color: #a0a0a0;'
             elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
             
-            # A: 背景薄青、文字黒
+            # A: 薄青、黒文字
             elif val == 'A': styles.at[r, c] += 'background-color: #e6f7ff; color: black;' 
             elif val == 'B': styles.at[r, c] += 'background-color: #ccffcc; color: black;'
             elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
-            # D: 背景オレンジ系 (旧ネコ)
             elif val == 'D': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
-            # Z: 背景グレー系 (余剰・夜勤など)
-            elif val == 'Z' or val == '〇': styles.at[r, c] += 'background-color: #f0f0f0; color: #555;'
+            # 〇 (夜勤): 薄紫
+            elif val == '〇': styles.at[r, c] += 'background-color: #e6e6fa; color: black;'
+            # Z (その他): グレー
+            elif val == 'Z': styles.at[r, c] += 'background-color: #f2f2f2; color: #666;'
             
             if "※" in val and r != "不足":
                  styles.at[r, c] += 'color: red; font-weight: bold;'
@@ -430,7 +448,7 @@ def generate_custom_csv(result_df, staff_df, days_list):
     return "\n".join(lines).encode('utf-8-sig')
 
 # --- UI実装 ---
-st.title('📅 シフト作成ツール (D枠・Z枠対応版)')
+st.title('📅 シフト作成ツール (ABCD必須版)')
 
 with st.sidebar:
     st.header("⚙️ 設定管理")

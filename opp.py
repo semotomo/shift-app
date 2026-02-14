@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(バランス改善版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(完成版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -134,24 +134,32 @@ def assign_roles_smartly(working_indices, role_map):
     pool = list(working_indices)
     assigned_roles = {"Neko": 0, "A": 0, "B": 0, "C": 0}
     
-    # 1. ネコ専任
-    for s in pool:
-        if "Neko" in role_map[s] and "A" not in role_map[s] and "B" not in role_map[s]:
-            assignments[s] = "ネコ"; assigned_roles["Neko"] += 1
+    # 割り当てロジック（ネコを優先的に確保するよう修正）
     
-    # 2. その他
+    # 1. まずネコ能力がある人をチェック
+    #    まだ誰もネコになっておらず、その人がネコ能力を持っていれば、優先的にネコにする
+    for s in pool:
+        caps = role_map[s]
+        if "Neko" in caps and assigned_roles["Neko"] == 0:
+            assignments[s] = "ネコ"
+            assigned_roles["Neko"] += 1
+    
+    # 2. その他のロールを割り当て
     for s in pool:
         if s in assignments: continue
         caps = role_map[s]
+        
+        # A, B, C のバランス割り当て
         if "A" in caps and assigned_roles["A"] == 0: assignments[s] = "A"; assigned_roles["A"] += 1
         elif "B" in caps and assigned_roles["B"] == 0: assignments[s] = "B"; assigned_roles["B"] += 1
         elif "C" in caps and assigned_roles["C"] == 0: assignments[s] = "C"; assigned_roles["C"] += 1
-        elif "Neko" in caps and assigned_roles["Neko"] == 0: assignments[s] = "ネコ"; assigned_roles["Neko"] += 1
+        # ロールが埋まっている場合のフォールバック（能力があればそれを表示）
+        elif "Neko" in caps: assignments[s] = "ネコ"
         elif "A" in caps: assignments[s] = "A"
         elif "B" in caps: assignments[s] = "B"
         elif "C" in caps: assignments[s] = "C"
-        elif "Neko" in caps: assignments[s] = "ネコ"
         else: assignments[s] = "〇"
+        
     return assignments
 
 def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
@@ -171,7 +179,6 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
     enable_seishain = config.get("enable_seishain_rule", True)
     priority_days_str = config.get("priority_days", [])
     penalty_weight = config.get("consecutive_penalty_weight", "通常")
-    # 連勤ペナルティを強化（特に4連勤以上を嫌がるように）
     cons_penalty_base = 3000 if penalty_weight == "厳格" else (2000 if penalty_weight == "通常" else 1000)
     
     weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
@@ -182,11 +189,10 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
             if row["Staff A"] in name_to_idx and row["Staff B"] in name_to_idx:
                 constraints.append({"a": name_to_idx[row["Staff A"]], "b": name_to_idx[row["Staff B"]], "type": row["Type"]})
 
-    # 状態管理に 'off_cons' (連休数) を追加
     current_paths = [{'sched': np.zeros((num_staff, num_days)), 
                       'cons': staff_df['前月末の連勤数'].values, 
                       'offs': np.zeros(num_staff), 
-                      'off_cons': np.zeros(num_staff), # 連休カウンター
+                      'off_cons': np.zeros(num_staff),
                       'score': 0}]
     
     for d_idx, d_obj in enumerate(days_list):
@@ -197,14 +203,12 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
         days_remaining_including_today = num_days - d_idx
         must_rest_indices = set()
         
-        # 希望休
         holiday_today_indices = [s for s in range(num_staff) if holidays_df.iloc[s, d_idx]]
         must_rest_indices.update(holiday_today_indices)
 
         next_paths = []
         base_avail = [s for s in range(num_staff) if s not in holiday_today_indices]
 
-        # パターン生成 (少し多めに)
         pats = []
         for size in range(4, min(len(base_avail)+1, 10)):
             sample_pool = list(itertools.combinations(base_avail, size))
@@ -222,7 +226,7 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
             for s in range(num_staff):
                 current_off = path['offs'][s]
                 needed = req_offs[s]
-                # 公休数絶対遵守：休まないと間に合わない人は強制的に休み
+                # 公休数絶対遵守
                 if (needed - current_off) >= days_remaining_including_today:
                     path_must_rest.add(s)
             
@@ -256,39 +260,30 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
                 
                 for s in range(num_staff):
                     if s in p:
-                        # 出勤
                         work_mask[s] = 1; new_cons[s] += 1; new_off_cons[s] = 0
                         
-                        # --- 連勤バランス調整 ---
-                        # 最大連勤を超えたら重ペナルティ
+                        # 連勤バランス
                         if new_cons[s] > max_cons[s]: 
                              penalty += cons_penalty_base * (new_cons[s] - max_cons[s]) * 20
-                        # 4連勤以上もなるべく避ける (例: maxが5でも、4で抑えたい)
                         elif new_cons[s] >= 4:
-                             penalty += 5000 # 4連勤を嫌がるペナルティ
+                             penalty += 5000 
                         
                     else:
-                        # 休み
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
-                        
                         if enable_seishain and is_seishain[s] and is_weekend: penalty += 500
                         
-                        # --- 連休バランス調整 ---
-                        # 3連休以上を避ける (希望休でなければ)
+                        # 連休バランス (希望休以外で3連休以上を避ける)
                         if new_off_cons[s] >= 3:
-                            # 該当日が希望休ならペナルティなし、AI判断なら重ペナルティ
                             if not holidays_df.iloc[s, d_idx]:
                                 penalty += 50000
                 
-                # --- 公休消化のバランス (分散) ---
-                # 「今の時点で休んでなさすぎ」または「休みすぎ」を検知して減点
+                # 公休分散ペナルティ
                 for s in range(num_staff):
                     expected_off = req_offs[s] * ((d_idx + 1) / num_days)
                     diff = new_offs[s] - expected_off
-                    # 予定より休みが少なすぎる(過労) or 多すぎる(暇)と減点
                     penalty += abs(diff) * 2000 
 
-                # 4. 公休数厳守 (絶対)
+                # 4. 公休数厳守
                 for s in range(num_staff):
                     if new_offs[s] > req_offs[s]: penalty += 100000000 
 
@@ -343,7 +338,7 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
 
     return pd.DataFrame(res_data, columns=multi_cols, index=index_names), evaluation
 
-# --- スタイル設定 (A=青) ---
+# --- スタイル設定 (A=黒文字) ---
 def highlight_cells(data):
     styles = pd.DataFrame('', index=data.index, columns=data.columns)
     
@@ -367,8 +362,8 @@ def highlight_cells(data):
                  styles.at[r, c] += 'background-color: #ffcccc; color: red; font-weight: bold;'
             elif val == '／': styles.at[r, c] += 'background-color: #ffdddd; color: #a0a0a0;'
             elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
-            # Aを青色に指定
-            elif val == 'A': styles.at[r, c] += 'background-color: #e6f7ff; color: blue; font-weight: bold;' 
+            # Aの文字色を黒に修正
+            elif val == 'A': styles.at[r, c] += 'background-color: #e6f7ff; color: black; font-weight: bold;' 
             elif val == 'B': styles.at[r, c] += 'background-color: #ccffcc; color: black;'
             elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
             elif val == 'ネコ': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
@@ -411,7 +406,7 @@ def generate_custom_csv(result_df, staff_df, days_list):
     return "\n".join(lines).encode('utf-8-sig')
 
 # --- UI実装 ---
-st.title('📅 シフト作成ツール (バランス重視版)')
+st.title('📅 シフト作成ツール (完成版)')
 
 with st.sidebar:
     st.header("⚙️ 設定管理")

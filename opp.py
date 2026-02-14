@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(完全版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(スタイル適用版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -51,7 +51,7 @@ def get_default_data():
     # ユーザー指定のデフォルトデータ
     staff_data = {
         "名前": ["西原", "松本", "中島", "山下", "下尾", "原", "松尾"],
-        "レベル": ["リーダー", "リーダー", "スタッフ", "スタッフ", "新人", "スタッフ", "スタッフ"], # レベル補完
+        "レベル": ["リーダー", "リーダー", "スタッフ", "スタッフ", "新人", "スタッフ", "スタッフ"],
         "正社員": [True, True, True, True, False, False, False],
         "朝可": [True, True, True, True, False, True, True],
         "夜可": [True, True, True, True, True, False, False], 
@@ -63,9 +63,7 @@ def get_default_data():
         "最大連勤": [4, 4, 4, 4, 3, 4, 3],
         "公休数": [8, 8, 8, 8, 13, 9, 15]
     }
-    # holidays初期化
     holidays_data = pd.DataFrame(False, index=range(len(staff_data["名前"])), columns=[f"Day_{i+1}" for i in range(31)])
-    # ペア初期化
     pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
     return pd.DataFrame(staff_data), holidays_data, pairs_df
 
@@ -96,7 +94,6 @@ def load_settings_from_file():
             pairs_df = pd.DataFrame(loaded_data.get("pairs", []))
             if pairs_df.empty: pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
             
-            # 日付
             try:
                 s_d = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
                 e_d = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
@@ -234,7 +231,7 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
                         if enable_seishain and is_seishain[s] and is_weekend:
                             penalty += 500
                 
-                # 公休数厳守
+                # 公休数厳守 (絶対: 1億点ペナルティ)
                 days_left = num_days - 1 - d_idx
                 for s in range(num_staff):
                     if new_offs[s] > req_offs[s]: penalty += 100000000 
@@ -292,8 +289,64 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
 
     return pd.DataFrame(res_data, columns=multi_cols, index=index_names), evaluation
 
+# --- スタイル設定 ---
+def highlight_cells(data):
+    styles = pd.DataFrame('', index=data.index, columns=data.columns)
+    for col in data.columns:
+        week_str = col[1]
+        if week_str == '土': styles[col] = 'background-color: #e6f7ff;'
+        elif week_str in ['日', '祝']: styles[col] = 'background-color: #ffe6e6;'
+    for r in data.index:
+        for c in data.columns:
+            val = str(data.at[r, c])
+            if c[0] == '勤(休)':
+                styles.at[r, c] += 'font-weight: bold; background-color: #f9f9f9;'
+                if "※" in val: styles.at[r, c] += 'color: red;'
+                continue
+            
+            if val == '／': styles.at[r, c] = 'background-color: #ffcccc; color: black;'
+            elif val == '×': styles.at[r, c] = 'background-color: #d9d9d9; color: gray;'
+            elif val == '※': styles.at[r, c] = 'background-color: #ff0000; color: white; font-weight: bold;'
+            elif val == 'A': styles.at[r, c] = 'background-color: #ccffff; color: black;'
+            elif val == 'B': styles.at[r, c] = 'background-color: #ccffcc; color: black;'
+            elif val == 'C': styles.at[r, c] = 'background-color: #ffffcc; color: black;'
+            elif val == 'ネコ': styles.at[r, c] = 'background-color: #ffe5cc; color: black;'
+            elif val == '〇': styles.at[r, c] = 'background-color: #e6e6fa; color: black;'
+    return styles
+
+# --- CSV生成 ---
+def generate_custom_csv(result_df, staff_df, days_list):
+    weekdays_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    row1 = ["", "本店"]
+    current_m = days_list[0].month
+    count = 0
+    for d in days_list:
+        if d.month == current_m:
+            row1.append(f"　{current_m}月 " if count == 0 else "")
+            count += 1
+        else:
+            current_m = d.month
+            count = 1
+            row1.append(f"　{current_m}月 ")
+    row1.append("")
+    row2 = ["", "日にち"] + [str(d.day) for d in days_list] + ["勤(休)"]
+    row3 = ["\"先月からの\n連勤日数\"", "曜日"]
+    for d in days_list:
+        row3.append("祝" if is_holiday(d) else weekdays_jp[d.weekday()])
+    row3.append("")
+    data_rows = []
+    col_prev_cons = "前月末の連勤数" if "前月末の連勤数" in staff_df.columns else "先月からの連勤"
+    prev_cons_map = {row['名前']: row[col_prev_cons] for _, row in staff_df.iterrows()}
+    for name, row in result_df.iterrows():
+        if name == "不足": continue
+        p_cons = prev_cons_map.get(name, 0)
+        data_rows.append([str(p_cons), name] + list(row.values))
+    lines = [",".join(row1), ",".join(row2), ",".join(row3)]
+    for dr in data_rows: lines.append(",".join([str(x) for x in dr]))
+    return "\n".join(lines).encode('utf-8-sig')
+
 # --- UI実装 ---
-st.title('📅 シフト作成ツール (完全版)')
+st.title('📅 シフト作成ツール (最終完全版)')
 
 with st.sidebar:
     st.header("⚙️ 設定管理")
@@ -330,8 +383,13 @@ with st.sidebar:
             st.session_state.holidays_df = pd.DataFrame(loaded_data["holidays"])
             st.session_state.config = loaded_data.get("config", get_default_config())
             st.session_state.pairs_df = pd.DataFrame(loaded_data.get("pairs", []))
-            st.session_state.l_start = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
-            st.session_state.l_end = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
+            
+            try:
+                st.session_state.l_start = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
+                st.session_state.l_end = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
+            except:
+                pass 
+                
             st.success("設定を読み込みました！")
             st.rerun()
         except Exception as e:
@@ -382,7 +440,7 @@ with st.form("settings"):
         }
     )
 
-    # 2. 希望休入力 (以前のスタイルで復活)
+    # 2. 希望休入力
     st.markdown("### 2️⃣ 希望休入力")
     holiday_cols = [f"Day_{i+1}" for i in range(num_days)]
     
@@ -397,18 +455,15 @@ with st.form("settings"):
     # 行数合わせ
     valid_staff_count = len(st.session_state.staff_df[st.session_state.staff_df['名前'].notna() & (st.session_state.staff_df['名前'] != "")])
     if len(display_holidays_df) < valid_staff_count:
-        # 行が足りない場合は追加
         diff = valid_staff_count - len(display_holidays_df)
         display_holidays_df = pd.concat([display_holidays_df, pd.DataFrame(False, index=range(diff), columns=holiday_cols)], ignore_index=True)
     elif len(display_holidays_df) > valid_staff_count:
-        # 多い場合はカット
         display_holidays_df = display_holidays_df.iloc[:valid_staff_count]
 
     # 名前列を追加
     display_holidays_df.insert(0, "名前", st.session_state.staff_df['名前'].values[:len(display_holidays_df)])
-    display_holidays_df.columns = ui_cols # ヘッダーを日付に変更
+    display_holidays_df.columns = ui_cols 
 
-    # エディタ設定
     col_config_holidays = {"名前": st.column_config.TextColumn("名前", disabled=True, width="small")}
     for i in range(len(days_list)): 
         col_config_holidays[ui_cols[i+1]] = st.column_config.CheckboxColumn(width="small", default=False)
@@ -416,9 +471,8 @@ with st.form("settings"):
     edited_holidays_grid = st.data_editor(display_holidays_df, use_container_width=True, hide_index=True, column_config=col_config_holidays)
 
     if st.form_submit_button("✅ 設定を反映して保存"):
-        # 保存処理
-        new_holidays = edited_holidays_grid.drop(columns=["名前"]) # 名前列を削除して保存
-        new_holidays.columns = holiday_cols # カラム名をDay_Xに戻す
+        new_holidays = edited_holidays_grid.drop(columns=["名前"]) 
+        new_holidays.columns = holiday_cols 
         st.session_state.holidays_df = new_holidays
         st.success("設定を更新しました！")
         st.rerun()
@@ -442,6 +496,9 @@ if st.button("🚀 3パターンのシフト案を作成する", type="primary")
                 c_score.metric("AIスコア", f"{eval_res['score']}点")
                 c_info.info(f"**AI評価**: {eval_res['comment']} （{eval_res['details']}）")
                 
-                # スタイル適用（不足※と集計※を赤く）
-                st.dataframe(res_df.style.applymap(lambda v: 'background-color: #ffcccc' if v == '／' else ('background-color: #ff0000; color: white' if '※' in str(v) else '')), use_container_width=True)
-                st.download_button(f"📥 案 {chr(65+i)} をダウンロード", res_df.to_csv(encoding="utf-8-sig"), f"shift_plan_{chr(65+i)}.csv")
+                # スタイル適用
+                styled_df = res_df.style.apply(highlight_cells, axis=None)
+                st.dataframe(styled_df, use_container_width=True, height=600)
+                
+                csv_data = generate_custom_csv(res_df, st.session_state.staff_df, days_list)
+                st.download_button(f"📥 案 {chr(65+i)} をダウンロード", csv_data, f"shift_plan_{chr(65+i)}.csv")

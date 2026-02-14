@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(完成版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(修正版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -17,7 +17,6 @@ st.markdown("""
     th, td { padding: 2px 4px !important; font-size: 13px !important; text-align: center !important; }
     div[data-testid="stDataFrame"] th { white-space: pre-wrap !important; vertical-align: bottom !important; line-height: 1.3 !important; }
     th[aria-label="名前"], td[aria-label="名前"] { max-width: 100px !important; min-width: 100px !important; }
-    /* レベル列の幅調整 */
     th[aria-label="レベル"], td[aria-label="レベル"] { min-width: 80px !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -131,34 +130,43 @@ def can_cover_required_roles(staff_list, role_map, level_map, min_night_count):
 
 def assign_roles_smartly(working_indices, role_map):
     assignments = {}
+    # 出勤者リスト（割り当て候補）
     pool = list(working_indices)
-    assigned_roles = {"Neko": 0, "A": 0, "B": 0, "C": 0}
     
-    # 割り当てロジック（ネコを優先的に確保するよう修正）
+    # 役割を埋める優先順位: ネコ > A > B > C
     
-    # 1. まずネコ能力がある人をチェック
-    #    まだ誰もネコになっておらず、その人がネコ能力を持っていれば、優先的にネコにする
-    for s in pool:
-        caps = role_map[s]
-        if "Neko" in caps and assigned_roles["Neko"] == 0:
-            assignments[s] = "ネコ"
-            assigned_roles["Neko"] += 1
-    
-    # 2. その他のロールを割り当て
-    for s in pool:
-        if s in assignments: continue
-        caps = role_map[s]
+    # 1. ネコ (最優先)
+    # ネコ能力がある人を検索
+    neko_candidates = [s for s in pool if "Neko" in role_map[s]]
+    if neko_candidates:
+        # ネコ候補がいれば、最初の人をネコに割り当てて、候補プールから外す
+        # (ここでAやBを兼任していても強制的にネコにする)
+        neko_person = neko_candidates[0]
+        assignments[neko_person] = "ネコ"
+        pool.remove(neko_person)
         
-        # A, B, C のバランス割り当て
-        if "A" in caps and assigned_roles["A"] == 0: assignments[s] = "A"; assigned_roles["A"] += 1
-        elif "B" in caps and assigned_roles["B"] == 0: assignments[s] = "B"; assigned_roles["B"] += 1
-        elif "C" in caps and assigned_roles["C"] == 0: assignments[s] = "C"; assigned_roles["C"] += 1
-        # ロールが埋まっている場合のフォールバック（能力があればそれを表示）
-        elif "Neko" in caps: assignments[s] = "ネコ"
+    # 2. A
+    a_candidates = [s for s in pool if "A" in role_map[s]]
+    if a_candidates:
+        a_person = a_candidates[0]
+        assignments[a_person] = "A"
+        pool.remove(a_person)
+
+    # 3. B
+    b_candidates = [s for s in pool if "B" in role_map[s]]
+    if b_candidates:
+        b_person = b_candidates[0]
+        assignments[b_person] = "B"
+        pool.remove(b_person)
+
+    # 4. 残りの人は能力に応じて C または Night/〇
+    for s in pool:
+        caps = role_map[s]
+        if "C" in caps: assignments[s] = "C"
+        elif "B" in caps: assignments[s] = "B" # C枠がなくてBができる場合
         elif "A" in caps: assignments[s] = "A"
-        elif "B" in caps: assignments[s] = "B"
-        elif "C" in caps: assignments[s] = "C"
-        else: assignments[s] = "〇"
+        elif "Neko" in caps: assignments[s] = "ネコ"
+        else: assignments[s] = "〇" # Night専任など
         
     return assignments
 
@@ -262,7 +270,6 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
                     if s in p:
                         work_mask[s] = 1; new_cons[s] += 1; new_off_cons[s] = 0
                         
-                        # 連勤バランス
                         if new_cons[s] > max_cons[s]: 
                              penalty += cons_penalty_base * (new_cons[s] - max_cons[s]) * 20
                         elif new_cons[s] >= 4:
@@ -272,18 +279,15 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
                         if enable_seishain and is_seishain[s] and is_weekend: penalty += 500
                         
-                        # 連休バランス (希望休以外で3連休以上を避ける)
                         if new_off_cons[s] >= 3:
                             if not holidays_df.iloc[s, d_idx]:
                                 penalty += 50000
                 
-                # 公休分散ペナルティ
                 for s in range(num_staff):
                     expected_off = req_offs[s] * ((d_idx + 1) / num_days)
                     diff = new_offs[s] - expected_off
                     penalty += abs(diff) * 2000 
 
-                # 4. 公休数厳守
                 for s in range(num_staff):
                     if new_offs[s] > req_offs[s]: penalty += 100000000 
 
@@ -363,7 +367,7 @@ def highlight_cells(data):
             elif val == '／': styles.at[r, c] += 'background-color: #ffdddd; color: #a0a0a0;'
             elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
             # Aの文字色を黒に修正
-            elif val == 'A': styles.at[r, c] += 'background-color: #e6f7ff; color: black; font-weight: bold;' 
+            elif val == 'A': styles.at[r, c] += 'background-color: #e6f7ff; color: black;' 
             elif val == 'B': styles.at[r, c] += 'background-color: #ccffcc; color: black;'
             elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
             elif val == 'ネコ': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
@@ -406,7 +410,7 @@ def generate_custom_csv(result_df, staff_df, days_list):
     return "\n".join(lines).encode('utf-8-sig')
 
 # --- UI実装 ---
-st.title('📅 シフト作成ツール (完成版)')
+st.title('📅 シフト作成ツール (修正版)')
 
 with st.sidebar:
     st.header("⚙️ 設定管理")

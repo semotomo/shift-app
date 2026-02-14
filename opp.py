@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(修正版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(D枠・Z枠対応版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -57,7 +57,7 @@ def get_default_data():
         "A": [True, True, False, False, False, False, False],
         "B": [False, True, True, True, False, False, False],
         "C": [False, False, True, True, False, True, True],
-        "ネコ": [False, True, True, True, False, True, True],
+        "D": [False, True, True, True, False, True, True], # 旧ネコ
         "前月末の連勤数": [0, 5, 1, 0, 0, 2, 2],
         "最大連勤": [4, 4, 4, 4, 3, 4, 3],
         "公休数": [8, 8, 8, 8, 13, 9, 15]
@@ -81,8 +81,12 @@ def load_settings_from_file():
                 loaded_data = json.load(f)
             staff_df = pd.DataFrame(loaded_data["staff"])
             
+            # 列名のマイグレーション (ネコ -> D)
+            if "ネコ" in staff_df.columns and "D" not in staff_df.columns:
+                staff_df = staff_df.rename(columns={"ネコ": "D"})
+            
             # 列補完
-            cols_def = {"正社員": False, "朝可": True, "夜可": False, "A": False, "B": False, "C": False, "ネコ": False, "最大連勤": 4, "レベル": "スタッフ"}
+            cols_def = {"正社員": False, "朝可": True, "夜可": False, "A": False, "B": False, "C": False, "D": False, "最大連勤": 4, "レベル": "スタッフ"}
             for col, val in cols_def.items():
                 if col not in staff_df.columns: staff_df[col] = val
             
@@ -129,53 +133,71 @@ def can_cover_required_roles(staff_list, role_map, level_map, min_night_count):
     return True
 
 def assign_roles_smartly(working_indices, role_map):
-    assignments = {}
-    # 出勤者リスト（割り当て候補）
     pool = list(working_indices)
+    target_roles = ["A", "B", "C", "D"]
+    best_assignment = {}
+    best_score = -1
     
-    # 役割を埋める優先順位: ネコ > A > B > C
+    # 組み合わせ爆発を防ぐため、候補者が多い場合はランダムサンプリングで最適解を探る
+    # (A,B,C,D を埋めるための順列探索)
     
-    # 1. ネコ (最優先)
-    # ネコ能力がある人を検索
-    neko_candidates = [s for s in pool if "Neko" in role_map[s]]
-    if neko_candidates:
-        # ネコ候補がいれば、最初の人をネコに割り当てて、候補プールから外す
-        # (ここでAやBを兼任していても強制的にネコにする)
-        neko_person = neko_candidates[0]
-        assignments[neko_person] = "ネコ"
-        pool.remove(neko_person)
+    # 全探索（または十分な回数の試行）で、A>B>C>D の優先順位で埋まるパターンを探す
+    # スコアリング: A埋まった=1000点, B埋まった=100点, C=10点, D=1点
+    
+    # 4人選ぶ組み合わせ（順列）を作成
+    # poolの人数が4人未満の場合はその人数分
+    k = min(len(pool), 4)
+    
+    # 高速化のため、役割を持たない人は除外して順列を作るなどの工夫も可能だが
+    # ここではシンプルにpermutationし、役割適正をチェックする
+    
+    candidates_perms = []
+    if len(pool) <= 8:
+        candidates_perms = list(itertools.permutations(pool, k))
+    else:
+        # 人数が多い場合はランダムにシャッフルして試行
+        for _ in range(2000):
+            candidates_perms.append(random.sample(pool, k))
+            
+    for p in candidates_perms:
+        temp_assign = {}
+        score = 0
         
-    # 2. A
-    a_candidates = [s for s in pool if "A" in role_map[s]]
-    if a_candidates:
-        a_person = a_candidates[0]
-        assignments[a_person] = "A"
-        pool.remove(a_person)
-
-    # 3. B
-    b_candidates = [s for s in pool if "B" in role_map[s]]
-    if b_candidates:
-        b_person = b_candidates[0]
-        assignments[b_person] = "B"
-        pool.remove(b_person)
-
-    # 4. 残りの人は能力に応じて C または Night/〇
+        # p[0] -> A, p[1] -> B, p[2] -> C, p[3] -> D (kによって変動)
+        used_roles = set()
+        
+        if k >= 1 and "A" in role_map[p[0]]: 
+            score += 1000; temp_assign[p[0]] = "A"; used_roles.add("A")
+        if k >= 2 and "B" in role_map[p[1]]: 
+            score += 100; temp_assign[p[1]] = "B"; used_roles.add("B")
+        if k >= 3 and "C" in role_map[p[2]]: 
+            score += 10; temp_assign[p[2]] = "C"; used_roles.add("C")
+        if k >= 4 and "D" in role_map[p[3]]: 
+            score += 1; temp_assign[p[3]] = "D"; used_roles.add("D")
+            
+        if score > best_score:
+            best_score = score
+            best_assignment = temp_assign
+            
+        if score == 1111: # 全て埋まったら終了
+            break
+            
+    # 選ばれなかった人は全員 "Z"
+    final_assignments = {}
     for s in pool:
-        caps = role_map[s]
-        if "C" in caps: assignments[s] = "C"
-        elif "B" in caps: assignments[s] = "B" # C枠がなくてBができる場合
-        elif "A" in caps: assignments[s] = "A"
-        elif "Neko" in caps: assignments[s] = "ネコ"
-        else: assignments[s] = "〇" # Night専任など
-        
-    return assignments
+        if s in best_assignment:
+            final_assignments[s] = best_assignment[s]
+        else:
+            final_assignments[s] = "Z"
+            
+    return final_assignments
 
 def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
     random.seed(seed)
     np.random.seed(seed)
     
     num_days, num_staff = len(days_list), len(staff_df)
-    role_map = {i: {c for c in ["A","B","C","ネコ","Night"] if staff_df.iloc[i].get(c.replace("Night","夜可"))} for i in range(num_staff)}
+    role_map = {i: {c for c in ["A","B","C","D","Night"] if staff_df.iloc[i].get(c.replace("Night","夜可"))} for i in range(num_staff)}
     level_map = staff_df['レベル'].to_dict()
     name_to_idx = {n: i for i, n in enumerate(staff_df['名前'])}
     
@@ -234,7 +256,6 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
             for s in range(num_staff):
                 current_off = path['offs'][s]
                 needed = req_offs[s]
-                # 公休数絶対遵守
                 if (needed - current_off) >= days_remaining_including_today:
                     path_must_rest.add(s)
             
@@ -269,16 +290,13 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
                 for s in range(num_staff):
                     if s in p:
                         work_mask[s] = 1; new_cons[s] += 1; new_off_cons[s] = 0
-                        
                         if new_cons[s] > max_cons[s]: 
                              penalty += cons_penalty_base * (new_cons[s] - max_cons[s]) * 20
                         elif new_cons[s] >= 4:
                              penalty += 5000 
-                        
                     else:
                         new_cons[s] = 0; new_offs[s] += 1; new_off_cons[s] += 1
                         if enable_seishain and is_seishain[s] and is_weekend: penalty += 500
-                        
                         if new_off_cons[s] >= 3:
                             if not holidays_df.iloc[s, d_idx]:
                                 penalty += 50000
@@ -318,7 +336,7 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
         
         for s in range(num_staff):
             if s in working: 
-                res_data[s, d] = roles.get(s, "〇")
+                res_data[s, d] = roles.get(s, "Z") # デフォルトはZ
             else: 
                 res_data[s, d] = "／"
 
@@ -342,7 +360,7 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
 
     return pd.DataFrame(res_data, columns=multi_cols, index=index_names), evaluation
 
-# --- スタイル設定 (A=黒文字) ---
+# --- スタイル設定 ---
 def highlight_cells(data):
     styles = pd.DataFrame('', index=data.index, columns=data.columns)
     
@@ -355,7 +373,6 @@ def highlight_cells(data):
         for c in data.columns:
             val = str(data.at[r, c])
             
-            # 集計列
             if c[0] == '勤(休)':
                 styles.at[r, c] += 'font-weight: bold; background-color: #ffffff; border-left: 2px solid #ccc;'
                 if "※" in val: styles.at[r, c] += 'color: red;'
@@ -366,12 +383,15 @@ def highlight_cells(data):
                  styles.at[r, c] += 'background-color: #ffcccc; color: red; font-weight: bold;'
             elif val == '／': styles.at[r, c] += 'background-color: #ffdddd; color: #a0a0a0;'
             elif val == '×': styles.at[r, c] += 'background-color: #d9d9d9; color: gray;'
-            # Aの文字色を黒に修正
+            
+            # A: 背景薄青、文字黒
             elif val == 'A': styles.at[r, c] += 'background-color: #e6f7ff; color: black;' 
             elif val == 'B': styles.at[r, c] += 'background-color: #ccffcc; color: black;'
             elif val == 'C': styles.at[r, c] += 'background-color: #ffffcc; color: black;'
-            elif val == 'ネコ': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
-            elif val == '〇' or val == 'Night': styles.at[r, c] += 'background-color: #e6e6fa; color: black;'
+            # D: 背景オレンジ系 (旧ネコ)
+            elif val == 'D': styles.at[r, c] += 'background-color: #ffe5cc; color: black;'
+            # Z: 背景グレー系 (余剰・夜勤など)
+            elif val == 'Z' or val == '〇': styles.at[r, c] += 'background-color: #f0f0f0; color: #555;'
             
             if "※" in val and r != "不足":
                  styles.at[r, c] += 'color: red; font-weight: bold;'
@@ -410,7 +430,7 @@ def generate_custom_csv(result_df, staff_df, days_list):
     return "\n".join(lines).encode('utf-8-sig')
 
 # --- UI実装 ---
-st.title('📅 シフト作成ツール (修正版)')
+st.title('📅 シフト作成ツール (D枠・Z枠対応版)')
 
 with st.sidebar:
     st.header("⚙️ 設定管理")
@@ -488,7 +508,7 @@ with st.form("settings"):
             "A": st.column_config.CheckboxColumn("A", width="small"),
             "B": st.column_config.CheckboxColumn("B", width="small"),
             "C": st.column_config.CheckboxColumn("C", width="small"),
-            "ネコ": st.column_config.CheckboxColumn("🐱", width="small"),
+            "D": st.column_config.CheckboxColumn("D (旧ネコ)", width="small"),
             "前月末の連勤数": st.column_config.NumberColumn("前連勤", width="small"),
             "最大連勤": st.column_config.NumberColumn("MAX連", width="small"),
             "公休数": st.column_config.NumberColumn("公休", width="small"),

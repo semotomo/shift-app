@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(入力版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(ペア設定版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -28,9 +28,7 @@ st.markdown("""
         white-space: pre-wrap !important;
         display: inline-block !important;
     }
-    /* 名前列 */
     th[aria-label="名前"], td[aria-label="名前"] { max-width: 100px !important; min-width: 100px !important; }
-    /* 設定列 */
     th[aria-label="社員"], td[aria-label="社員"],
     th[aria-label="朝"], td[aria-label="朝"],
     th[aria-label="夜"], td[aria-label="夜"],
@@ -80,6 +78,7 @@ def load_settings_from_file():
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                 loaded_data = json.load(f)
             staff_df = pd.DataFrame(loaded_data["staff"])
+            # 列補完
             for col in ["正社員", "朝可", "夜可", "A", "B", "C", "ネコ", "最大連勤"]:
                 if col not in staff_df.columns:
                     if col == "最大連勤": staff_df[col] = 4
@@ -95,9 +94,16 @@ def load_settings_from_file():
                 except: pass
             
             config = loaded_data.get("config", get_default_config())
-            return staff_df, pd.DataFrame(loaded_data["holidays"]), start_d, end_d, config
-        except Exception: return None, None, None, None, None
-    return None, None, None, None, None
+            
+            # ペア設定の読み込み（なければ空）
+            pairs_data = loaded_data.get("pairs", [])
+            pairs_df = pd.DataFrame(pairs_data)
+            if pairs_df.empty:
+                pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
+
+            return staff_df, pd.DataFrame(loaded_data["holidays"]), start_d, end_d, config, pairs_df
+        except Exception: return None, None, None, None, None, None
+    return None, None, None, None, None, None
 
 def get_default_date_range():
     today = datetime.date.today()
@@ -122,23 +128,27 @@ def get_default_data():
         "公休数": [8, 8, 8, 8, 13, 9, 15]
     }
     holidays_data = pd.DataFrame(False, index=range(7), columns=[f"Day_{i+1}" for i in range(31)])
-    return pd.DataFrame(staff_data), holidays_data
+    pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
+    return pd.DataFrame(staff_data), holidays_data, pairs_df
 
+# --- セッション初期化 ---
 if 'staff_df' not in st.session_state:
-    loaded_staff, loaded_holidays, l_start, l_end, l_config = load_settings_from_file()
+    loaded_staff, loaded_holidays, l_start, l_end, l_config, l_pairs = load_settings_from_file()
     if loaded_staff is not None:
         st.session_state.staff_df = loaded_staff
         st.session_state.holidays_df = loaded_holidays
         st.session_state.loaded_start_date = l_start
         st.session_state.loaded_end_date = l_end
         st.session_state.config = l_config if l_config else get_default_config()
+        st.session_state.pairs_df = l_pairs
     else:
-        d_staff, d_holidays = get_default_data()
+        d_staff, d_holidays, d_pairs = get_default_data()
         st.session_state.staff_df = d_staff
         st.session_state.holidays_df = d_holidays
         st.session_state.loaded_start_date = None
         st.session_state.loaded_end_date = None
         st.session_state.config = get_default_config()
+        st.session_state.pairs_df = d_pairs
 
 # --- ロジック関数 ---
 def get_role_map_from_df(staff_df):
@@ -155,7 +165,6 @@ def get_role_map_from_df(staff_df):
     return role_map
 
 def can_cover_required_roles(staff_list, role_map, min_night_count=3):
-    # 夜勤の人数確保を最優先判定
     if sum(1 for s in staff_list if "Night" in role_map[s]) < min_night_count: return False
     
     neko_cands = [s for s in staff_list if "Neko" in role_map[s]]
@@ -233,7 +242,7 @@ def assign_roles_smartly(working_indices, role_map):
     return assignments
 
 # --- メインロジック ---
-def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
+def solve_schedule_from_ui(staff_df, holidays_df, days_list, config, pairs_df):
     staff_df = staff_df.dropna(subset=['名前'])
     staff_df = staff_df[staff_df['名前'] != '']
     staff_df = staff_df.reset_index(drop=True)
@@ -242,6 +251,23 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
     if num_staff == 0: return None
     role_map = get_role_map_from_df(staff_df)
     
+    # 名前のインデックス辞書
+    name_to_idx = {name: i for i, name in enumerate(staff_df['名前'])}
+    
+    # ペア制約の解析
+    pair_constraints = []
+    if not pairs_df.empty:
+        for _, row in pairs_df.iterrows():
+            name_a = row.get("Staff A")
+            name_b = row.get("Staff B")
+            p_type = row.get("Type")
+            if name_a in name_to_idx and name_b in name_to_idx and name_a != name_b:
+                pair_constraints.append({
+                    "a": name_to_idx[name_a],
+                    "b": name_to_idx[name_b],
+                    "type": p_type # "NG" or "Pair"
+                })
+
     min_night = config.get("min_night_staff", 3)
     enable_seishain_rule = config.get("enable_seishain_rule", True)
     priority_days = config.get("priority_days", ["土", "日"])
@@ -301,7 +327,23 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config):
                 new_weekend_offs = path['weekend_offs'].copy()
                 penalty = 0
                 
-                # 【重要】夜勤の人員確保不足に超巨大ペナルティ（休日数遵守と同レベル）
+                # ペア制約チェック（強力なペナルティ）
+                for const in pair_constraints:
+                    a_in = const["a"] in pat
+                    b_in = const["b"] in pat
+                    
+                    if const["type"] == "NG":
+                        # NGなのに両方いる -> 重大ペナルティ
+                        if a_in and b_in:
+                            penalty += 800000
+                    
+                    elif const["type"] == "Pair":
+                        # 固定ペアなのに、片方だけいる -> 重大ペナルティ
+                        # (両方いない、または両方いるならOK)
+                        if a_in != b_in:
+                            penalty += 800000
+
+                # 夜勤不足ペナルティ
                 if not can_cover_required_roles(pat, role_map, min_night):
                     penalty += 800000 
                 
@@ -469,7 +511,8 @@ with st.sidebar:
             "staff": clean_staff_df.to_dict(),
             "holidays": st.session_state.holidays_df.to_dict(),
             "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")},
-            "config": st.session_state.config 
+            "config": st.session_state.config,
+            "pairs": st.session_state.pairs_df.to_dict() # ペア情報も保存
         }
         try:
             with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -484,7 +527,8 @@ with st.sidebar:
         "staff": clean_staff_df.to_dict(),
         "holidays": st.session_state.holidays_df.to_dict(),
         "date_range": {"start": start_input.strftime("%Y-%m-%d"), "end": end_input.strftime("%Y-%m-%d")},
-        "config": st.session_state.config
+        "config": st.session_state.config,
+        "pairs": st.session_state.pairs_df.to_dict()
     }, ensure_ascii=False)
     st.download_button("設定ファイルDL", json_str, "shift_settings.json", "application/json")
     
@@ -507,6 +551,8 @@ with st.sidebar:
                 st.session_state.loaded_end_date = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
             if "config" in loaded_data:
                 st.session_state.config = loaded_data["config"]
+            if "pairs" in loaded_data:
+                st.session_state.pairs_df = pd.DataFrame(loaded_data["pairs"])
             st.rerun()
         except: st.error("読込エラー")
 
@@ -533,6 +579,23 @@ with st.form("settings_form"):
             "priority_days": new_priority_days,
             "consecutive_penalty_weight": new_penalty
         })
+
+    # --- 新規追加：ペア設定セクション ---
+    with st.expander("🤝 相性・ペア設定（クリックで開閉）", expanded=False):
+        st.info("「NG」は一緒のシフトになるのを避けます。「Pair」は必ず一緒のシフトにします。")
+        staff_names = st.session_state.staff_df['名前'].dropna().unique().tolist()
+        
+        edited_pairs_df = st.data_editor(
+            st.session_state.pairs_df,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "Staff A": st.column_config.SelectboxColumn("スタッフ A", options=staff_names, required=True),
+                "Staff B": st.column_config.SelectboxColumn("スタッフ B", options=staff_names, required=True),
+                "Type": st.column_config.SelectboxColumn("タイプ", options=["NG", "Pair"], required=True, default="NG")
+            },
+            key="pairs_editor"
+        )
 
     st.markdown("### 1️⃣ スタッフ設定")
     st.info("💡 変更後、下の **「✅ 設定を反映して保存」** ボタンを押してください。")
@@ -578,6 +641,8 @@ with st.form("settings_form"):
 
 if submit_btn:
     st.session_state.staff_df = edited_staff_df
+    st.session_state.pairs_df = edited_pairs_df # ペア情報も更新
+    
     valid_staff_count = len(edited_staff_df[edited_staff_df['名前'].notna() & (edited_staff_df['名前'] != "")])
     new_holidays = edited_holidays_grid.drop(columns=["名前"])
     new_holidays.columns = holiday_cols 
@@ -591,18 +656,25 @@ if submit_btn:
 
 st.markdown("### 3️⃣ シフト作成")
 if st.button("シフトを作成する"):
-    with st.spinner("AIが最優先で夜勤枠を埋めています...🧩"):
+    with st.spinner("シフトを作成中..."):
         try:
-            result = solve_schedule_from_ui(st.session_state.staff_df, st.session_state.holidays_df, days_list, st.session_state.config)
+            # 引数にペア設定を追加
+            result = solve_schedule_from_ui(
+                st.session_state.staff_df, 
+                st.session_state.holidays_df, 
+                days_list, 
+                st.session_state.config,
+                st.session_state.pairs_df
+            )
             if result is not None:
                 result_df, final_score = result
                 
                 if final_score >= 1000000:
                     st.warning("⚠️ 【AIからの報告】どうしても公休数を守れないスタッフがいました。")
                 elif final_score >= 800000:
-                    st.warning("⚠️ 【AIからの報告】最優先しましたが、夜勤人数が足りない日があります。（不足行の※を確認してください）")
+                    st.warning("⚠️ 【AIからの報告】夜勤不足、またはペア設定（NG/固定）を守れない日が発生しました。")
                 else:
-                    st.success("✨ 作成完了！夜勤を含め、条件を綺麗に満たしたシフトができました。")
+                    st.success("✨ 作成完了！条件を綺麗に満たしたシフトができました。")
 
                 st.subheader(f"{days_list[0].month}月度 シフト表")
                 styled_df = result_df.style.apply(highlight_cells, axis=None)

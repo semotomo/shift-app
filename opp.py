@@ -17,7 +17,6 @@ st.markdown("""
     th, td { padding: 2px 4px !important; font-size: 13px !important; text-align: center !important; }
     div[data-testid="stDataFrame"] th { white-space: pre-wrap !important; vertical-align: bottom !important; line-height: 1.3 !important; }
     th[aria-label="名前"], td[aria-label="名前"] { max-width: 100px !important; min-width: 100px !important; }
-    /* レベル列の幅調整 */
     th[aria-label="レベル"], td[aria-label="レベル"] { min-width: 80px !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -48,6 +47,35 @@ def get_default_config():
         "consecutive_penalty_weight": "通常"
     }
 
+def get_default_data():
+    # ユーザー指定のデフォルトデータ
+    staff_data = {
+        "名前": ["西原", "松本", "中島", "山下", "下尾", "原", "松尾"],
+        "レベル": ["リーダー", "リーダー", "スタッフ", "スタッフ", "新人", "スタッフ", "スタッフ"], # レベル補完
+        "正社員": [True, True, True, True, False, False, False],
+        "朝可": [True, True, True, True, False, True, True],
+        "夜可": [True, True, True, True, True, False, False], 
+        "A": [True, True, False, False, False, False, False],
+        "B": [False, True, True, True, False, False, False],
+        "C": [False, False, True, True, False, True, True],
+        "ネコ": [False, True, True, True, False, True, True],
+        "前月末の連勤数": [0, 5, 1, 0, 0, 2, 2],
+        "最大連勤": [4, 4, 4, 4, 3, 4, 3],
+        "公休数": [8, 8, 8, 8, 13, 9, 15]
+    }
+    # holidays初期化
+    holidays_data = pd.DataFrame(False, index=range(len(staff_data["名前"])), columns=[f"Day_{i+1}" for i in range(31)])
+    # ペア初期化
+    pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
+    return pd.DataFrame(staff_data), holidays_data, pairs_df
+
+def get_default_date_range():
+    today = datetime.date.today()
+    start_date = today.replace(day=26)
+    if start_date.month == 12: end_date = start_date.replace(year=start_date.year + 1, month=1, day=25)
+    else: end_date = start_date.replace(month=start_date.month + 1, day=25)
+    return start_date, end_date
+
 # --- データ管理 ---
 def load_settings_from_file():
     if os.path.exists(SETTINGS_FILE):
@@ -68,39 +96,39 @@ def load_settings_from_file():
             pairs_df = pd.DataFrame(loaded_data.get("pairs", []))
             if pairs_df.empty: pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
             
-            return staff_df, pd.DataFrame(loaded_data["holidays"]), \
-                   datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date(), \
-                   datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date(), config, pairs_df
+            # 日付
+            try:
+                s_d = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
+                e_d = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
+            except:
+                s_d, e_d = get_default_date_range()
+
+            return staff_df, pd.DataFrame(loaded_data["holidays"]), s_d, e_d, config, pairs_df
         except: return None, None, None, None, None, None
     return None, None, None, None, None, None
-
-def get_default_date_range():
-    today = datetime.date.today()
-    start_date = today.replace(day=26)
-    if start_date.month == 12: end_date = start_date.replace(year=start_date.year + 1, month=1, day=25)
-    else: end_date = start_date.replace(month=start_date.month + 1, day=25)
-    return start_date, end_date
 
 # --- 初期化 ---
 if 'staff_df' not in st.session_state:
     l_staff, l_holidays, l_start, l_end, l_config, l_pairs = load_settings_from_file()
     if l_staff is not None:
-        st.session_state.staff_df, st.session_state.holidays_df = l_staff, l_holidays
-        st.session_state.l_start, st.session_state.l_end, st.session_state.config, st.session_state.pairs_df = l_start, l_end, l_config, l_pairs
+        st.session_state.staff_df = l_staff
+        st.session_state.holidays_df = l_holidays
+        st.session_state.l_start = l_start
+        st.session_state.l_end = l_end
+        st.session_state.config = l_config
+        st.session_state.pairs_df = l_pairs
     else:
-        st.session_state.staff_df = pd.DataFrame({"名前": ["西原", "松本"], "レベル": ["リーダー", "スタッフ"], "正社員": [True, True], "朝可": [True, True], "夜可": [True, True], "A": [True, True], "B": [False, True], "C": [False, False], "ネコ": [False, True], "前月末の連勤数": [0, 0], "最大連勤": [4, 4], "公休数": [8, 8]})
-        st.session_state.holidays_df = pd.DataFrame(False, index=range(2), columns=[f"Day_{i+1}" for i in range(31)])
+        d_staff, d_holidays, d_pairs = get_default_data()
+        st.session_state.staff_df = d_staff
+        st.session_state.holidays_df = d_holidays
         st.session_state.config = get_default_config()
-        st.session_state.pairs_df = pd.DataFrame(columns=["Staff A", "Staff B", "Type"])
+        st.session_state.pairs_df = d_pairs
         st.session_state.l_start, st.session_state.l_end = get_default_date_range()
 
 # --- ロジック ---
 def can_cover_required_roles(staff_list, role_map, level_map, min_night_count):
-    # 夜勤
     if sum(1 for s in staff_list if "Night" in role_map[s]) < min_night_count: return False
-    # リーダー
     if sum(1 for s in staff_list if level_map[s] == "リーダー") < 1: return False
-    # ABC要件
     if len(staff_list) < 4: return False
     return True
 
@@ -178,15 +206,15 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
             for p in pats:
                 penalty = 0
                 
-                # 1. 役割要件
+                # 役割要件
                 if not can_cover_required_roles(p, role_map, level_map, min_night):
                     penalty += 50000 
                 
-                # 2. 優先日
+                # 優先日
                 if is_priority and len(p) <= 4:
                     penalty += 1000
 
-                # 3. ペア制約
+                # ペア制約
                 for c in constraints:
                     a_in, b_in = c["a"] in p, c["b"] in p
                     if c["type"] == "NG" and a_in and b_in: penalty += 100000
@@ -206,7 +234,7 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
                         if enable_seishain and is_seishain[s] and is_weekend:
                             penalty += 500
                 
-                # 4. 公休数厳守 (絶対)
+                # 公休数厳守
                 days_left = num_days - 1 - d_idx
                 for s in range(num_staff):
                     if new_offs[s] > req_offs[s]: penalty += 100000000 
@@ -265,10 +293,12 @@ def solve_core(staff_df, holidays_df, days_list, config, pairs_df, seed):
     return pd.DataFrame(res_data, columns=multi_cols, index=index_names), evaluation
 
 # --- UI実装 ---
-st.title('📅 シフト作成ツール (3パターン＋AI採点)')
+st.title('📅 シフト作成ツール (完全版)')
 
 with st.sidebar:
-    st.header("⚙️ 設定・保存")
+    st.header("⚙️ 設定管理")
+    
+    # 1. 保存
     if st.button("💾 設定をサーバーに保存", type="primary"):
         save_dict = {
             "staff": st.session_state.staff_df.to_dict(), 
@@ -278,10 +308,41 @@ with st.sidebar:
             "pairs": st.session_state.pairs_df.to_dict()
         }
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f: json.dump(save_dict, f, ensure_ascii=False, indent=2)
-        st.success("保存完了")
-    
+        st.success("サーバーに保存しました")
+
+    # 2. ダウンロード
+    save_dict = {
+        "staff": st.session_state.staff_df.to_dict(), 
+        "holidays": st.session_state.holidays_df.to_dict(), 
+        "date_range": {"start": st.session_state.l_start.strftime("%Y-%m-%d"), "end": st.session_state.l_end.strftime("%Y-%m-%d")}, 
+        "config": st.session_state.config, 
+        "pairs": st.session_state.pairs_df.to_dict()
+    }
+    json_str = json.dumps(save_dict, ensure_ascii=False, indent=2)
+    st.download_button("📥 設定ファイルをダウンロード", json_str, "shift_settings.json", "application/json")
+
+    # 3. アップロード
+    uploaded_file = st.file_uploader("📂 設定ファイルを読み込む", type=["json"])
+    if uploaded_file is not None:
+        try:
+            loaded_data = json.load(uploaded_file)
+            st.session_state.staff_df = pd.DataFrame(loaded_data["staff"])
+            st.session_state.holidays_df = pd.DataFrame(loaded_data["holidays"])
+            st.session_state.config = loaded_data.get("config", get_default_config())
+            st.session_state.pairs_df = pd.DataFrame(loaded_data.get("pairs", []))
+            st.session_state.l_start = datetime.datetime.strptime(loaded_data["date_range"]["start"], "%Y-%m-%d").date()
+            st.session_state.l_end = datetime.datetime.strptime(loaded_data["date_range"]["end"], "%Y-%m-%d").date()
+            st.success("設定を読み込みました！")
+            st.rerun()
+        except Exception as e:
+            st.error(f"読み込みエラー: {e}")
+
+    st.markdown("---")
+    st.header("📅 日付設定")
     start_input = st.date_input("開始日", st.session_state.l_start)
     end_input = st.date_input("終了日", st.session_state.l_end)
+    st.session_state.l_start = start_input
+    st.session_state.l_end = end_input
     days_list = pd.date_range(start_input, end_input).tolist()
     num_days = len(days_list)
 

@@ -8,7 +8,7 @@ import datetime
 import os
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト作成ツール(スキル導入版)", layout="wide")
+st.set_page_config(page_title="シフト作成ツール(完全版)", layout="wide")
 
 # --- CSS設定 ---
 st.markdown("""
@@ -17,7 +17,6 @@ st.markdown("""
     th, td { padding: 2px 4px !important; font-size: 13px !important; text-align: center !important; }
     div[data-testid="stDataFrame"] th { white-space: pre-wrap !important; vertical-align: bottom !important; line-height: 1.3 !important; }
     th[aria-label="名前"], td[aria-label="名前"] { max-width: 100px !important; min-width: 100px !important; }
-    /* レベル列の幅調整 */
     th[aria-label="レベル"], td[aria-label="レベル"] { min-width: 80px !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -57,7 +56,7 @@ def load_settings_from_file():
                 loaded_data = json.load(f)
             staff_df = pd.DataFrame(loaded_data["staff"])
             
-            # 列補完（レベル追加）
+            # 列補完
             cols_def = {"正社員": False, "朝可": True, "夜可": False, "A": False, "B": False, "C": False, "ネコ": False, "最大連勤": 4, "レベル": "スタッフ"}
             for col, val in cols_def.items():
                 if col not in staff_df.columns: staff_df[col] = val
@@ -234,7 +233,6 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config, pairs_df):
     
     name_to_idx = {name: i for i, name in enumerate(staff_df['名前'])}
     
-    # ペア制約
     pair_constraints = []
     if not pairs_df.empty:
         for _, row in pairs_df.iterrows():
@@ -268,7 +266,8 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config, pairs_df):
         avail = [s for s in range(num_staff) if fixed_shifts[s, d] != '×']
         pats = get_possible_day_patterns(avail)
         random.shuffle(pats)
-        day_patterns.append(pats)
+        # パターン数を増やして探索漏れを防ぐ
+        day_patterns.append(pats[:500]) 
         
     current_paths = [{
         'sched': np.zeros((num_staff, num_days), dtype=int), 
@@ -291,9 +290,11 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config, pairs_df):
         next_paths = []
         patterns = day_patterns[d]
         
-        # フィルタ: 要件を満たすかどうか (夜勤 + リーダー)
+        # 役割要件チェック (夜勤 + リーダー)
         valid_pats = [p for p in patterns if can_cover_required_roles(p, role_map, level_map, min_night)]
         invalid_pats = [p for p in patterns if not can_cover_required_roles(p, role_map, level_map, min_night)]
+        
+        # 有効なパターンを優先的に採用
         use_patterns = valid_pats[:200] + invalid_pats[:50]
         
         for path in current_paths:
@@ -304,19 +305,24 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config, pairs_df):
                 new_weekend_offs = path['weekend_offs'].copy()
                 penalty = 0
                 
-                # ペア制約チェック
+                # --- ペナルティ計算（優先順位の厳格化）---
+
+                # 1. 【最優先】役割要件（リーダー不在、夜勤不足）
+                # 公休数違反(100万点)よりも圧倒的に高いペナルティを設定し、絶対に回避させる
+                if not can_cover_required_roles(pat, role_map, level_map, min_night):
+                    penalty += 100000000  # 1億点
+                
+                # 2. 【準優先】ペア制約（NGペア、固定ペア）
+                pair_violation = False
                 for const in pair_constraints:
                     a_in = const["a"] in pat
                     b_in = const["b"] in pat
-                    if const["type"] == "NG":
-                        if a_in and b_in: penalty += 800000
-                    elif const["type"] == "Pair":
-                        if a_in != b_in: penalty += 800000
+                    if const["type"] == "NG" and a_in and b_in: pair_violation = True
+                    elif const["type"] == "Pair" and (a_in != b_in): pair_violation = True
+                if pair_violation:
+                    penalty += 50000000 # 5000万点
 
-                # 必須要件チェック (夜勤 + リーダー) -> 休日数と同等レベルの最優先
-                if not can_cover_required_roles(pat, role_map, level_map, min_night):
-                    penalty += 800000 
-                
+                # 3. 優先曜日の人数確保
                 staff_count = len(pat)
                 if is_priority_day and staff_count <= 4: penalty += 30 
 
@@ -340,8 +346,11 @@ def solve_schedule_from_ui(staff_df, holidays_df, days_list, config, pairs_df):
                             penalty += 100
                             if "Neko" in role_map[s] and "C" in role_map[s] and "A" not in role_map[s]: penalty += 200
                 
+                # 4. 公休数チェック
                 days_left = num_days - 1 - d
                 for s in range(num_staff):
+                    # 公休数を守れない場合のペナルティ（100万点）
+                    # 役割要件(1億点)より低いため、役割確保のためにこちらが犠牲になることを許容する
                     if new_offs[s] > req_offs[s]: penalty += 1000000 
                     if new_offs[s] + days_left < req_offs[s]: penalty += 1000000 
 
@@ -641,10 +650,10 @@ if st.button("シフトを作成する"):
             if result is not None:
                 result_df, final_score = result
                 
-                if final_score >= 1000000:
-                    st.warning("⚠️ 【AIからの報告】どうしても公休数を守れないスタッフがいました。")
-                elif final_score >= 800000:
-                    st.warning("⚠️ 【AIからの報告】夜勤不足、リーダー不在、またはペア設定を守れない日が発生しました。（不足行の※を確認してください）")
+                if final_score >= 100000000:
+                   st.warning("⚠️ 【AIからの報告】どうしても条件を満たせず、リーダー不在、夜勤不足、またはNGペアが発生している日があります。（不足行の※を確認してください）")
+                elif final_score >= 1000000:
+                    st.warning("⚠️ 【AIからの報告】人員確保を最優先したため、一部スタッフの公休数が設定よりズレています。（右端の集計の※を確認してください）")
                 else:
                     st.success("✨ 作成完了！すべての条件を綺麗に満たしたシフトができました。")
 

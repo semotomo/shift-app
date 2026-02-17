@@ -1,0 +1,397 @@
+{
+  "staff": {
+    "名前": {
+      "0": "西原",
+      "1": "松本",
+      "2": "中島",
+      "3": "山下",
+      "4": "下尾",
+      "5": "原",
+      "6": "松尾"
+    },
+    "レベル": {
+      "0": "リーダー",
+      "1": "リーダー",
+      "2": "スタッフ",
+      "3": "スタッフ",
+      "4": "スタッフ",
+      "5": "スタッフ",
+      "6": "スタッフ"
+    },
+    "正社員": {
+      "0": true,
+      "1": true,
+      "2": true,
+      "3": true,
+      "4": null,
+      "5": null,
+      "6": null
+    },
+    "朝可": {
+      "0": true,
+      "1": true,
+      "2": true,
+      "3": true,
+      "4": null,
+      "5": true,
+      "6": true
+    },
+    "夜可": {
+      "0": true,
+      "1": true,
+      "2": true,
+      "3": true,
+      "4": true,
+      "5": null,
+      "6": null
+    },
+    "A": {
+      "0": true,
+      "1": true,
+      "2": null,
+      "3": null,
+      "4": null,
+      "5": null,
+      "6": null
+    },
+    "B": {
+      "0": false,
+      "1": true,
+      "2": true,
+      "3": true,
+      "4": null,
+      "5": null,
+      "6": null
+    },
+    "C": {
+      "0": false,
+      "1": false,
+      "2": true,
+      "3": true,
+      "4": null,
+      "5": true,
+      "6": true
+    },
+    "ネコ": {
+      "0": false,
+      "1": true,
+      "2": true,
+      "3": true,
+      "4": null,
+      "5": true,
+      "6": true
+    },
+    "前月末の連勤数": {
+      "0": 0,
+      "1": 4,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 0,
+      "6": 0
+    },
+    "最大連勤": {
+      "0": 4,
+      "1": 4,
+      "2": 4,
+      "3": 4,
+      "4": 3,
+      "5": 4,
+      "6": 3
+    },
+    "公休数": {
+      "0": 8,
+      "1": 8,
+      "2": 8,
+      "3": 8,
+      "4": 13,
+      "5": 9,
+      "6": 15
+    }
+  },
+  "holidays": {
+    "Day_1": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_2": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_3": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_4": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_5": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_6": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_7": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_8": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_9": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_10": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_11": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_12": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_13": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_14": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_15": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_16": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_17": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_18": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_19": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_20": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_21": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_22": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_23": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_24": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_25": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_26": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_27": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_28": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_29": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_30": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    },
+    "Day_31": {
+      "0": false,
+      "1": false,
+      "2": false,
+      "3": false,
+      "4": false,
+      "5": false,
+      "6": false
+    }
+  },
+  "date_range": {
+    "start": "2026-03-26",
+    "end": "2026-04-25"
+  }
+}
